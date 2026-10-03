@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "id": "calmasacow.agent-one",
+  "name": "Omarchy Agent One",
+  "version": "0.4.0",
+  "author": "James Barnette",
+  "license": "MIT",
+  "description": "Usage dashboard for coding agents on the Omarchy agents panel.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "keywords": [
+    "agent-one",
+    "coding agents",
+    "usage",
+    "agents",
+    "codex",
+    "claude",
+    "model usage",
+    "rate limits",
+    "default agent"
+  ],
+  "barWidget": {
+    "displayName": "Agent One",
+    "description": "Usage dashboard for Codex, Claude, Grok, Google Gemini, Cursor, DeepSeek, OpenCode, Pi, and Qwen Code.",
+    "category": "Developer Tools",
+    "aliases": [
+      "agent one",
+      "agent-one",
+      "agents",
+      "model-usage",
+      "google gemini",
+      "cursor",
+      "deepseek",
+      "opencode",
+      "pi",
+      "qwen code"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "providers": {
+        "claude": {
+          "enabled": true
+        },
+        "codex": {
+          "enabled": true
+        },
+        "grok": {
+          "enabled": true
+        },
+        "google": {
+          "enabled": true
+        },
+        "cursor": {
+          "enabled": true
+        },
+        "deepseek": {
+          "enabled": true
+        },
+        "opencode": {
+          "enabled": true
+        },
+        "pi": {
+          "enabled": true
+        },
+        "qwen": {
+          "enabled": true
+        }
+      },
+      "refreshIntervalSec": 900,
+      "syncMode": "Off",
+      "syncDir": "",
+      "syncFileName": "",
+      "syncDeviceId": ""
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 30,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 900
+      },
+      {
+        "key": "syncMode",
+        "type": "enum",
+        "label": "Synced aggregation",
+        "options": [
+          "Off",
+          "On"
+        ],
+        "defaultValue": "Off",
+        "description": "When On, write this machine's snapshot and merge snapshots from other machines."
+      },
+      {
+        "key": "syncDir",
+        "type": "path",
+        "label": "Sync folder",
+        "defaultValue": "",
+        "description": "A folder synced by Syncthing, Dropbox, rsync, etc."
+      },
+      {
+        "key": "syncFileName",
+        "type": "string",
+        "label": "Snapshot file name",
+        "defaultValue": "",
+        "description": "Optional. Defaults to <hostname>.json."
+      },
+      {
+        "key": "syncDeviceId",
+        "type": "string",
+        "label": "Device id",
+        "defaultValue": "",
+        "description": "Optional stable device name used inside synced aggregate snapshots."
+      }
+    ]
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.agents"
+  }
+}
