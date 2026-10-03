@@ -25,7 +25,13 @@ The existing Codex, Claude, and Grok usage panels are carried forward. Provider 
 
 ## Install
 
-This repository is under active local development. The intended published install command will be added after the new repository is connected to its remote marketplace source.
+The GitHub repository is private while development continues. Clone it with GitHub SSH access:
+
+```sh
+git clone git@github.com:calmasacow/omarchy-agent-one.git
+```
+
+The plugin is still under development and is not yet a marketplace release.
 
 ## Usage
 
