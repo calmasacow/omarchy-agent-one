@@ -21,7 +21,9 @@ The target selector is a 3×3 grid for these nine agents:
 8. Pi
 9. Qwen Code
 
-The existing Codex, Claude, and Grok usage panels are carried forward. Provider collectors will report local usage independently of account quota data; quota bars are shown only when an official or otherwise reliable account source is available.
+The existing Codex, Claude, and Grok usage panels are carried forward. Google Gemini support uses the installed Antigravity CLI (`agy`): token and prompt totals come from local transcript counters, while remaining Gemini weekly and five-hour quota comes from `agy /usage`. The collector reads timestamps and numeric counters only; prompt and response content is discarded. Quota is cached for five minutes. DeepSeek Harness contributes all-time local token and turn totals from its session usage projections. The collector reads aggregate counters only, never prompt text. Today's totals include sessions created today; the projections do not timestamp turns in older sessions, so their usage cannot be split by day. DeepSeek's balance is queried every five minutes through the credential route selected by the active Harness model configuration: the Harness OAuth grant uses DeepSeek Platform's account summary, and an API-key route uses DeepSeek's documented `/user/balance` endpoint. Credentials stay local and are never written to usage records or synced snapshots. Local token totals remain separate from account balance.
+
+The provider selector balances rows with at most three buttons each. Four providers use two rows of two; seven use rows of three, two, and two; eight use rows of three, three, and two.
 
 ## Install
 

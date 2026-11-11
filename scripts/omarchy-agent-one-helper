@@ -23,9 +23,12 @@ import datetime as dt
 import fcntl
 import json
 import os
+import re
+import shutil
 import stat
 import sys
 import time
+from decimal import Decimal, InvalidOperation
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -52,6 +55,16 @@ MAX_REMOTE_BYTES = 1024 * 1024
 MAX_STDOUT_BYTES = 1024 * 1024
 MAX_SESSION_FILES = 400
 MAX_JSONL_BYTES = 4 * 1024 * 1024
+MAX_DEEPSEEK_PROJECTION_FILES = 1000
+MAX_DEEPSEEK_PROJECTION_BYTES = 1024 * 1024
+MAX_DEEPSEEK_CREDENTIAL_BYTES = 256 * 1024
+MAX_ANTIGRAVITY_TRANSCRIPTS = 200
+MAX_ANTIGRAVITY_TRANSCRIPT_BYTES = 4 * 1024 * 1024
+ANTIGRAVITY_QUOTA_REFRESH_SECONDS = 300
+DEEPSEEK_BALANCE_REFRESH_SECONDS = 300
+DEEPSEEK_API_BALANCE_URL = "https://api.deepseek.com/user/balance"
+DEEPSEEK_ACCOUNT_KEY = "deepseek-account-platform/default"
+DEEPSEEK_API_KEY_RECORD = "llm-deepseek-api-key/deepseek-official"
 MAX_SUMMARY_BYTES = 64 * 1024
 MAX_USAGE_FILES = 16
 MAX_SNAPSHOT_FILES = 32
@@ -221,6 +234,635 @@ def usage_dir() -> Path:
   path = state / "omarchy" / "agents" / "usage"
   path.mkdir(parents=True, exist_ok=True)
   return path
+
+
+def deepseek_harness_running() -> bool:
+  executable = shutil.which("deepseek-harness")
+  if not executable:
+    return False
+  expected = os.path.realpath(executable)
+  proc = Path("/proc")
+  try:
+    entries = list(proc.iterdir())
+  except OSError:
+    return False
+  for entry in entries:
+    if not entry.name.isdigit():
+      continue
+    try:
+      if os.path.realpath(entry / "exe") == expected:
+        return True
+    except OSError:
+      continue
+  return False
+
+
+def deepseek_projection_stats(root: Path | None = None) -> dict[str, Any] | None:
+  if root is None:
+    raw_home = os.environ.get("DSH_HOME")
+    home = Path(os.path.expandvars(os.path.expanduser(raw_home))) if raw_home else Path.home() / ".dsh"
+    root = home / "storages" / "session_projcache" / "sessions"
+  if root.is_symlink() or not root.is_dir():
+    return None
+  paths: list[Path] = []
+  capped = False
+  try:
+    with os.scandir(root) as entries:
+      for entry in entries:
+        if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
+          continue
+        if len(paths) >= MAX_DEEPSEEK_PROJECTION_FILES:
+          capped = True
+          break
+        paths.append(Path(entry.path))
+  except OSError:
+    return None
+  paths.sort(key=lambda path: path.name)
+
+  totals = {
+    "uncachedInputTokens": 0,
+    "outputTokens": 0,
+    "cacheReadTokens": 0,
+    "cacheWriteTokens": 0,
+  }
+  sessions = 0
+  turns = 0
+  turn_stats_seen = 0
+  today = dt.date.today()
+  today_totals = {key: 0 for key in totals}
+  today_sessions = 0
+  today_turns = 0
+  today_turn_stats_seen = 0
+  usable = 0
+  skipped_forks = 0
+  for path in paths:
+    data = read_json_object(path, MAX_DEEPSEEK_PROJECTION_BYTES)
+    record = data.get("record") if isinstance(data, dict) else None
+    if not isinstance(record, dict):
+      continue
+    identity = record.get("identity")
+    rows = record.get("rows")
+    if not isinstance(identity, dict) or not isinstance(rows, dict):
+      continue
+    usage_row = rows.get("tokenUsage")
+    usage_value = usage_row.get("val") if isinstance(usage_row, dict) else None
+    usage_totals = usage_value.get("totals") if isinstance(usage_value, dict) else None
+    if not isinstance(usage_totals, dict):
+      continue
+    parsed: dict[str, int] = {}
+    valid = True
+    for key in totals:
+      value = usage_totals.get(key)
+      if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or value > 2**53:
+        valid = False
+        break
+      if isinstance(value, float) and not value.is_integer():
+        valid = False
+        break
+      parsed[key] = int(value)
+    if not valid:
+      continue
+    usable += 1
+    # A fork's projection includes its inherited prefix. Counting it beside
+    # its source would duplicate those model calls, so omit seeded sessions.
+    if identity.get("isSeeded") is True or number(identity.get("inheritedEventCount")) > 0:
+      skipped_forks += 1
+      continue
+    sessions += 1
+    for key, value in parsed.items():
+      totals[key] += value
+    stats_row = rows.get("sessionStats")
+    stats_value = stats_row.get("val") if isinstance(stats_row, dict) else None
+    if isinstance(stats_value, dict):
+      session_turns = number(stats_value.get("turns"))
+      turns += session_turns
+      turn_stats_seen += 1
+    created_at = identity.get("createdAt")
+    try:
+      created_today = (
+        isinstance(created_at, (int, float)) and not isinstance(created_at, bool)
+        and 0 < created_at <= 253402300799000
+        and dt.datetime.fromtimestamp(created_at / 1000).date() == today
+      )
+    except (OverflowError, OSError, ValueError):
+      created_today = False
+    if created_today:
+      today_sessions += 1
+      for key, value in parsed.items():
+        today_totals[key] += value
+      if isinstance(stats_value, dict):
+        today_turns += session_turns
+        today_turn_stats_seen += 1
+
+  if usable == 0:
+    return None
+  total_tokens = sum(totals.values())
+  today_token_count = sum(today_totals.values())
+  cache_input = totals["uncachedInputTokens"] + totals["cacheReadTokens"] + totals["cacheWriteTokens"]
+  return {
+    **totals,
+    "totalTokenCount": total_tokens,
+    "totalSessions": sessions,
+    "totalPrompts": turns,
+    "todayPrompts": today_turns,
+    "todaySessions": today_sessions,
+    "todayTotalTokens": today_token_count,
+    "todayTokensByModel": {},
+    "hasPromptStats": sessions > 0 and turn_stats_seen == sessions,
+    "hasDailyPromptStats": today_sessions > 0 and today_turn_stats_seen == today_sessions,
+    "hasDailyStats": today_sessions > 0,
+    "dailyStatsNote": (
+      "Today includes sessions created today; Harness does not timestamp older turns, "
+      "so usage in sessions started before today cannot be split by day."
+      if today_sessions > 0 else
+      "Harness projections have no per-turn timestamps, so today's usage is unknown for older sessions."
+    ),
+    "activeDays": 0,
+    "hasCacheStats": cache_input > 0,
+    "cacheHitRate": totals["cacheReadTokens"] / cache_input if cache_input > 0 else None,
+    "hasActiveDayStats": False,
+    "skippedForks": skipped_forks,
+    "capped": capped,
+  }
+
+
+def write_deepseek_record() -> int:
+  detected = deepseek_harness_running()
+  stats = deepseek_projection_stats()
+  has_usage = bool(stats and (stats.get("totalTokenCount") or stats.get("totalPrompts")))
+  previous = read_json_object(usage_dir() / "deepseek.json", MAX_USAGE_RECORD_BYTES)
+  if stats is None and isinstance(previous, dict) and (
+    number(previous.get("totalTokenCount")) > 0 or number(previous.get("totalSessions")) > 0
+  ):
+    # An unavailable or temporarily unreadable projection directory must not
+    # erase a real last-known usage snapshot.
+    stats = {
+      key: previous.get(key)
+      for key in (
+        "uncachedInputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens",
+        "totalTokenCount", "totalSessions", "totalPrompts", "activeDays",
+        "todayPrompts", "todaySessions", "todayTotalTokens", "todayTokensByModel",
+        "hasPromptStats", "hasDailyPromptStats", "dailyStatsNote",
+        "hasCacheStats", "cacheHitRate", "hasDailyStats", "hasActiveDayStats",
+        "skippedForks", "capped",
+      )
+    }
+  record = {
+    "schemaVersion": 1,
+    "id": "deepseek",
+    "name": "DeepSeek Harness",
+    "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+    "ready": bool(stats and (stats.get("totalTokenCount") or stats.get("totalSessions"))),
+    "detected": detected,
+    "hasLocalStats": stats is not None,
+    "hasPromptStats": bool(stats and stats.get("hasPromptStats")),
+    "hasDailyStats": False,
+    "hasActiveDayStats": False,
+    "hasCacheStats": bool(stats and stats.get("hasCacheStats")),
+    "usageStatusText": (
+      "No model calls recorded" if stats is not None and not has_usage
+      else "Usage data unavailable" if detected and stats is None
+      else ""
+    ),
+    "statusKind": "info",
+    "sourceStatusText": "DeepSeek Harness local usage" if stats is not None else "DeepSeek Harness detected",
+    "authHelpText": (
+      (
+        "The session cache currently records no completed model calls. "
+        if not has_usage else
+        "All-time provider-reported tokens and session turns come from the Harness cache. "
+      )
+      + "Account balances are read separately from local token totals."
+      + (" " + str(stats.get("dailyStatsNote")) if stats and stats.get("dailyStatsNote") else "")
+      + (" Forked sessions are omitted to prevent inherited usage from being counted twice." if stats and stats.get("skippedForks") else "")
+      + (" The scan reached its session limit." if stats and stats.get("capped") else "")
+      if stats is not None else
+      "No completed Harness model calls are recorded yet. Today's activity for older sessions is unavailable."
+    ),
+    "limits": [],
+    "todayPrompts": 0,
+    "todaySessions": 0,
+    "todayTotalTokens": 0,
+    "todayTokensByModel": {},
+    "recentDays": [],
+    "totalPrompts": 0,
+    "totalSessions": 0,
+    "activeDays": 0,
+    "modelUsage": {},
+  }
+  if stats is not None:
+    record.update(stats)
+  previous_fetched = number(previous.get("balanceFetchedAtMs")) if isinstance(previous, dict) else 0
+  if time.time() - previous_fetched / 1000 >= DEEPSEEK_BALANCE_REFRESH_SECONDS - 10:
+    refresh_deepseek_balance(record, previous)
+  elif isinstance(previous, dict) and isinstance(previous.get("balance"), dict):
+    copy_deepseek_balance(previous, record)
+  write_json(usage_dir() / "deepseek.json", record, mode=0o600)
+  return 0
+
+
+def copy_deepseek_balance(previous: dict[str, Any], record: dict[str, Any]) -> None:
+  for key in ("balance", "balanceFetchedAtMs", "balanceSource", "balanceStatusText"):
+    if key in previous:
+      record[key] = previous[key]
+  if previous.get("balanceSource"):
+    record["sourceStatusText"] = "DeepSeek " + str(previous["balanceSource"]) + " balance · Harness local usage"
+    note = str(record.get("dailyStatsNote") or "")
+    record["authHelpText"] = "Balance from " + str(previous["balanceSource"]) + "; local token and turn totals come from DeepSeek Harness session projections." + (" " + note if note else "")
+
+
+def deepseek_credential_store() -> dict[str, Any] | None:
+  raw_home = os.environ.get("DSH_HOME")
+  home = Path(os.path.expandvars(os.path.expanduser(raw_home))) if raw_home else Path.home() / ".dsh"
+  path = home / ".credentials.yaml"
+  try:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+      return None
+    data = open_regular(path, MAX_DEEPSEEK_CREDENTIAL_BYTES)
+    import yaml  # PyYAML is supplied by the system Python used by Omarchy.
+    store = yaml.safe_load(data.decode("utf-8"))
+  except Exception:
+    return None
+  return store if isinstance(store, dict) else None
+
+
+def deepseek_balance_credentials() -> tuple[str | None, str | None, dict[str, Any] | None]:
+  store = deepseek_credential_store()
+  if not store:
+    store = {}
+  refs = store.get("refs") if isinstance(store.get("refs"), dict) else {}
+  records = store.get("records") if isinstance(store.get("records"), dict) else {}
+  api_ref = deepseek_api_key_ref()
+  api_key = os.environ.get(api_ref, "").strip() or str(refs.get(api_ref, "")).strip()
+  api_record = records.get(DEEPSEEK_API_KEY_RECORD)
+  if not api_key and isinstance(api_record, dict) and api_record.get("kind") == "api-key":
+    api_key = str(api_record.get("key") or "").strip()
+    if not api_key:
+      env = api_record.get("env")
+      if isinstance(env, dict):
+        api_key = str(env.get(api_ref) or "").strip()
+  account = records.get(DEEPSEEK_ACCOUNT_KEY)
+  payload = account.get("payload") if isinstance(account, dict) and account.get("kind") == "grant" else None
+  token = None
+  issuer = None
+  if isinstance(payload, dict) and payload.get("version") == 1:
+    token = str(payload.get("token") or "").strip() or None
+    issuer = str(payload.get("issuer") or "").strip() or None
+  return api_key or None, token, {"issuer": issuer} if token else None
+
+
+def decimal_amount(value: Any) -> Decimal | None:
+  if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+    return None
+  try:
+    amount = Decimal(str(value))
+  except (InvalidOperation, ValueError):
+    return None
+  return amount if amount.is_finite() and amount >= 0 else None
+
+
+def deepseek_profile_provider() -> str:
+  raw_home = os.environ.get("DSH_HOME")
+  home = Path(os.path.expandvars(os.path.expanduser(raw_home))) if raw_home else Path.home() / ".dsh"
+  profile = os.environ.get("DSH_PROFILE", "desktop")
+  path = home / "profiles" / profile / "cordis.patch.yml"
+  try:
+    data = open_regular(path, 256 * 1024).decode("utf-8")
+  except Exception:
+    return ""
+  # This patch file is a YAML list; extract only the configured model route.
+  match = __import__("re").search(
+    r"(?ms)^- id:\s*agent-default-model\s*$.*?^\s+provider:\s*['\"]?([a-z0-9-]+)", data,
+  )
+  return match.group(1) if match else ""
+
+
+def deepseek_api_key_ref() -> str:
+  raw_home = os.environ.get("DSH_HOME")
+  home = Path(os.path.expandvars(os.path.expanduser(raw_home))) if raw_home else Path.home() / ".dsh"
+  profile = os.environ.get("DSH_PROFILE", "desktop")
+  path = home / "profiles" / profile / "cordis.patch.yml"
+  try:
+    data = open_regular(path, 256 * 1024).decode("utf-8")
+  except Exception:
+    return "DEEPSEEK_API_KEY"
+  match = __import__("re").search(
+    r"(?ms)^- id:\s*llm-deepseek-api-key\s*$.*?^\s+apiKeyEnv:\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)",
+    data,
+  )
+  return match.group(1) if match else "DEEPSEEK_API_KEY"
+
+
+def no_redirect_opener() -> urllib.request.OpenerDirector:
+  class RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+      raise urllib.error.HTTPError(newurl, code, "redirect refused", headers, fp)
+  opener = urllib.request.OpenerDirector()
+  for handler in (RejectRedirects(), urllib.request.HTTPSHandler(), urllib.request.HTTPErrorProcessor(),
+                  urllib.request.HTTPDefaultErrorHandler(), urllib.request.UnknownHandler()):
+    opener.add_handler(handler)
+  return opener
+
+
+def deepseek_fetch(url: str, headers: dict[str, str]) -> dict[str, Any]:
+  parsed = urllib.parse.urlsplit(url)
+  if parsed.scheme != "https" or parsed.hostname not in ("api.deepseek.com", "platform.deepseek.com"):
+    raise ValueError("refusing unexpected DeepSeek host")
+  request = urllib.request.Request(url, headers=headers, method="GET")
+  with no_redirect_opener().open(request, timeout=15) as response:
+    if response.geturl() != url:
+      raise ValueError("DeepSeek balance request redirected")
+    raw = response.read(65537)
+  if len(raw) > 65536:
+    raise ValueError("DeepSeek balance response too large")
+  value = json.loads(raw.decode("utf-8"))
+  if not isinstance(value, dict):
+    raise ValueError("invalid DeepSeek balance response")
+  return value
+
+
+def api_deepseek_balance(api_key: str) -> dict[str, Any] | None:
+  payload = deepseek_fetch(DEEPSEEK_API_BALANCE_URL, {"Authorization": "Bearer " + api_key, "Accept": "application/json"})
+  infos = payload.get("balance_infos")
+  if payload.get("is_available") not in (True, False) or not isinstance(infos, list):
+    return None
+  choices = []
+  for info in infos:
+    if not isinstance(info, dict):
+      continue
+    amount = decimal_amount(info.get("total_balance"))
+    currency = str(info.get("currency") or "").upper()
+    if amount is not None and currency in ("USD", "CNY"):
+      choices.append((currency, amount))
+  if not choices:
+    return None
+  currency, remaining = next((item for item in choices if item[0] == "USD"), choices[0])
+  return {"remaining": str(remaining), "funded": 0, "spent": 0, "currency": currency, "estimated": False}
+
+
+def oauth_deepseek_balance(token: str, issuer: str) -> dict[str, Any] | None:
+  parsed = urllib.parse.urlsplit(issuer)
+  if parsed.scheme != "https" or parsed.hostname != "platform.deepseek.com" or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+    raise ValueError("unrecognized DeepSeek Platform issuer")
+  package_version = "unknown"
+  for package_path in (
+    Path("/opt/DeepSeek Harness/resources/app/dsh/package.json"),
+    Path("/opt/DeepSeek Harness/resources/app/package.json"),
+  ):
+    package = read_json_object(package_path, 64 * 1024)
+    if package and package.get("version"):
+      package_version = str(package["version"])
+      break
+  now = dt.datetime.now().astimezone()
+  tz_offset = int((now.utcoffset() or dt.timedelta()).total_seconds())
+  headers = {
+    "Accept": "application/json",
+    "x-dsh-auth-token": token,
+    "x-client-bundle-id": "",
+    "x-client-platform": "web",
+    "x-client-version": package_version,
+    "x-client-locale": "en_US",
+    "x-client-timezone-offset": str(tz_offset),
+  }
+  payload = deepseek_fetch("https://platform.deepseek.com/api/v0/users/get_user_summary", headers)
+  data = payload.get("data")
+  if payload.get("code") != 0 or not isinstance(data, dict) or data.get("biz_code") != 0:
+    raise ValueError("DeepSeek OAuth balance request failed")
+  summary = data.get("biz_data")
+  if not isinstance(summary, dict):
+    return None
+  totals: dict[str, Decimal] = {}
+  for key in ("normal_wallets", "bonus_wallets"):
+    wallets = summary.get(key)
+    if not isinstance(wallets, list):
+      return None
+    for wallet in wallets:
+      if not isinstance(wallet, dict):
+        continue
+      currency = str(wallet.get("currency") or "").upper()
+      amount = decimal_amount(wallet.get("balance"))
+      if currency in ("USD", "CNY") and amount is not None:
+        totals[currency] = totals.get(currency, Decimal(0)) + amount
+  if not totals:
+    return None
+  currency = "USD" if "USD" in totals else next(iter(totals))
+  return {"remaining": str(totals[currency]), "funded": 0, "spent": 0, "currency": currency, "estimated": False}
+
+
+def refresh_deepseek_balance(record: dict[str, Any], previous: dict[str, Any] | None) -> None:
+  api_key, token, account = deepseek_balance_credentials()
+  configured_provider = deepseek_profile_provider()
+  sources = []
+  if configured_provider == "deepseek-official":
+    sources = [("API key", api_deepseek_balance, api_key)] + [("Harness OAuth", oauth_deepseek_balance, (token, str((account or {}).get("issuer") or "")))]
+  else:
+    sources = [("Harness OAuth", oauth_deepseek_balance, (token, str((account or {}).get("issuer") or "")))] + [("API key", api_deepseek_balance, api_key)]
+  last_error = ""
+  for label, fetcher, credential in sources:
+    if not credential or (isinstance(credential, tuple) and not credential[0]):
+      continue
+    try:
+      balance = fetcher(*credential) if isinstance(credential, tuple) else fetcher(str(credential))
+      if not balance:
+        raise ValueError("balance unavailable")
+      record.update({
+        "balance": balance,
+        "balanceFetchedAtMs": round(time.time() * 1000),
+        "balanceSource": label,
+        "balanceStatusText": "",
+        "sourceStatusText": "DeepSeek " + label + " balance · Harness local usage",
+      })
+      note = str(record.get("dailyStatsNote") or "")
+      record["authHelpText"] = "Balance from " + label + "; local token and turn totals come from DeepSeek Harness session projections." + (" " + note if note else "")
+      return
+    except Exception as exc:
+      # Diagnostics contain only an exception type, never request headers or response bodies.
+      last_error = type(exc).__name__
+      break
+  if isinstance(previous, dict) and isinstance(previous.get("balance"), dict):
+    copy_deepseek_balance(previous, record)
+    record["balanceStatusText"] = "Balance refresh failed; showing the last saved balance."
+    record["authHelpText"] += " The latest five-minute refresh failed; showing the last saved amount."
+  else:
+    record["balanceStatusText"] = "DeepSeek balance unavailable" if last_error else "Sign in to DeepSeek Harness or configure a DeepSeek API key"
+    note = str(record.get("dailyStatsNote") or "")
+    record["authHelpText"] = record["balanceStatusText"] + ". Local token totals remain available from Harness sessions." + (" " + note if note else "")
+
+
+def write_deepseek_balance_record() -> int:
+  path = usage_dir() / "deepseek.json"
+  previous = read_json_object(path, MAX_USAGE_RECORD_BYTES)
+  if not isinstance(previous, dict):
+    return write_deepseek_record()
+  record = dict(previous)
+  refresh_deepseek_balance(record, previous)
+  record["updatedAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
+  write_json(path, record, mode=0o600)
+  return 0
+
+
+def antigravity_root() -> Path:
+  raw = os.environ.get("GEMINI_CLI_HOME") or os.environ.get("ANTIGRAVITY_HOME")
+  return Path(os.path.expandvars(os.path.expanduser(raw))) if raw else Path.home() / ".gemini" / "antigravity-cli"
+
+
+def antigravity_transcript_stats(root: Path | None = None) -> dict[str, Any] | None:
+  """Aggregate only timestamps and numeric counters from Antigravity transcripts."""
+  base = root or antigravity_root()
+  brain = base / "brain"
+  if brain.is_symlink() or not brain.is_dir():
+    return None
+  now = dt.datetime.now().astimezone()
+  today = now.date()
+  totals = {"uncachedInputTokens": 0, "cacheReadTokens": 0, "cacheWriteTokens": 0, "outputTokens": 0}
+  daily = {key: 0 for key in totals}
+  prompts = today_prompts = sessions = today_sessions = 0
+  found = False
+  try:
+    dirs = sorted(brain.iterdir(), key=lambda path: path.name)[:MAX_ANTIGRAVITY_TRANSCRIPTS]
+  except OSError:
+    return None
+  for directory in dirs:
+    if directory.is_symlink() or not directory.is_dir():
+      continue
+    path = directory / ".system_generated" / "logs" / "transcript.jsonl"
+    if path.is_symlink():
+      continue
+    try:
+      raw = open_regular(path, MAX_ANTIGRAVITY_TRANSCRIPT_BYTES)
+    except (OSError, FileNotFoundError):
+      continue
+    sessions += 1
+    session_today = False
+    found = True
+    # Ignore a potentially incomplete final JSONL record.
+    lines = raw.splitlines()
+    if raw and not raw.endswith(b"\n"):
+      lines = lines[:-1]
+    for line in lines:
+      try:
+        entry = json.loads(line)
+      except (ValueError, UnicodeDecodeError):
+        continue
+      if not isinstance(entry, dict):
+        continue
+      stamp = entry.get("created_at") or entry.get("createdAt")
+      try:
+        when = dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).astimezone()
+      except (ValueError, TypeError):
+        continue
+      is_today = when.date() == today
+      if is_today:
+        session_today = True
+      if entry.get("type") == "USER_INPUT" and str(entry.get("status", "DONE")).upper() == "DONE":
+        prompts += 1
+        if is_today:
+          today_prompts += 1
+      if entry.get("type") != "PLANNER_RESPONSE" or str(entry.get("status", "")).upper() != "DONE":
+        continue
+      counters = {
+        "uncachedInputTokens": max(0, int(number(entry.get("input_tokens")) - number(entry.get("cache_read_tokens")))),
+        "cacheReadTokens": max(0, int(number(entry.get("cache_read_tokens")))),
+        "cacheWriteTokens": max(0, int(number(entry.get("cache_write_tokens")))),
+        "outputTokens": max(0, int(number(entry.get("output_tokens")))),
+      }
+      for key, value in counters.items():
+        totals[key] += value
+        if is_today:
+          daily[key] += value
+    if session_today:
+      today_sessions += 1
+  if not found:
+    return None
+  token_total = sum(totals.values())
+  today_total = sum(daily.values())
+  return {
+    "totalTokenCount": token_total, "allTimeTokens": token_total,
+    "uncachedInputTokens": totals["uncachedInputTokens"], "cacheReadTokens": totals["cacheReadTokens"],
+    "cacheWriteTokens": totals["cacheWriteTokens"], "outputTokens": totals["outputTokens"],
+    "todayTotalTokens": today_total, "todayUncachedInputTokens": daily["uncachedInputTokens"],
+    "todayCacheReadTokens": daily["cacheReadTokens"], "todayCacheWriteTokens": daily["cacheWriteTokens"],
+    "todayOutputTokens": daily["outputTokens"], "totalPrompts": prompts, "todayPrompts": today_prompts,
+    "totalSessions": sessions, "todaySessions": today_sessions, "hasLocalStats": True,
+    "hasPromptStats": True, "hasDailyStats": True, "hasDailyPromptStats": True,
+    "hasCacheStats": totals["cacheReadTokens"] > 0,
+  }
+
+
+def parse_antigravity_usage_report(text: str) -> list[dict[str, Any]]:
+  limits = []
+  # Accept only the Gemini Models rows, never Claude/GPT limits printed by agy.
+  pattern = re.compile(r"Gemini Models\s+(Weekly Limit|Five Hour Limit)\s+Remaining\s+(\d+(?:\.\d+)?)%\s*(?:\[([^]\r\n]+)\]|(20\d{2}-\d{2}-\d{2}T[^\s\r\n]+))?", re.I)
+  names = {"weekly limit": "Weekly", "five hour limit": "5-hour"}
+  for match in pattern.finditer(text):
+    remaining = min(100.0, max(0.0, float(match.group(2)))) / 100.0
+    reset = match.group(3) or match.group(4) or ""
+    try:
+      reset = dt.datetime.fromisoformat(reset.replace("Z", "+00:00")).isoformat()
+    except ValueError:
+      reset = ""
+    limits.append({"kind": "pool", "label": names[match.group(1).lower()] + " Gemini quota",
+                   "title": names[match.group(1).lower()], "percent": 1.0 - remaining, "resetsAt": reset})
+  return limits
+
+
+def antigravity_quota(previous: dict[str, Any] | None, force: bool = False) -> tuple[list[dict[str, Any]], str]:
+  old = previous if isinstance(previous, dict) else {}
+  cached_at = old.get("quotaUpdatedAt")
+  if not force and isinstance(cached_at, str):
+    try:
+      age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(cached_at)).total_seconds()
+      if age < ANTIGRAVITY_QUOTA_REFRESH_SECONDS and isinstance(old.get("limits"), list) and old["limits"]:
+        return old["limits"], str(old.get("quotaStatusText") or "")
+    except ValueError:
+      pass
+  executable = shutil.which("agy")
+  if not executable:
+    return (old.get("limits") if isinstance(old.get("limits"), list) else []), "Antigravity CLI unavailable"
+  try:
+    result = __import__("subprocess").run([executable, "--print", "/usage", "--output-format", "json"],
+      stdin=__import__("subprocess").DEVNULL, stdout=__import__("subprocess").PIPE,
+      stderr=__import__("subprocess").DEVNULL, timeout=20, check=False, text=True,
+      env={**os.environ, "NO_COLOR": "1"})
+    if result.returncode != 0 or len(result.stdout) > MAX_REMOTE_BYTES:
+      raise ValueError("usage report unavailable")
+    payload = json.loads(result.stdout)
+    report = payload.get("response", "") if isinstance(payload, dict) else ""
+    limits = parse_antigravity_usage_report(report if isinstance(report, str) else "")
+    if not limits:
+      raise ValueError("Gemini quota rows unavailable")
+    return limits, ""
+  except Exception:
+    return (old.get("limits") if isinstance(old.get("limits"), list) else []), "Antigravity quota temporarily unavailable"
+
+
+def write_antigravity_record(force: bool = False) -> int:
+  path = usage_dir() / "google.json"
+  previous = read_json_object(path, MAX_USAGE_RECORD_BYTES)
+  stats = antigravity_transcript_stats()
+  if stats is None and isinstance(previous, dict):
+    stats = {key: value for key, value in previous.items() if key in {
+      "totalTokenCount", "allTimeTokens", "uncachedInputTokens", "cacheReadTokens", "cacheWriteTokens",
+      "outputTokens", "todayTotalTokens", "todayUncachedInputTokens", "todayCacheReadTokens",
+      "todayCacheWriteTokens", "todayOutputTokens", "totalPrompts", "todayPrompts", "totalSessions",
+      "todaySessions", "hasLocalStats", "hasPromptStats", "hasDailyStats", "hasDailyPromptStats", "hasCacheStats"}}
+  if stats is None:
+    stats = {"totalTokenCount": 0, "allTimeTokens": 0, "todayTotalTokens": 0, "totalPrompts": 0,
+             "todayPrompts": 0, "totalSessions": 0, "todaySessions": 0, "hasLocalStats": False,
+             "hasPromptStats": False, "hasDailyStats": False, "hasDailyPromptStats": False, "hasCacheStats": False}
+  limits, quota_status = antigravity_quota(previous, force=force)
+  old_status_at = previous.get("quotaUpdatedAt") if isinstance(previous, dict) else None
+  quota_ok = not quota_status
+  record = {"schemaVersion": 1, "id": "google", "name": "Google Gemini", "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+    "ready": bool(stats.get("hasLocalStats")) or bool(limits), "limits": limits, "tierLabel": "Antigravity",
+    "sourceStatusText": "Antigravity CLI",
+    "usageStatusText": quota_status, "authHelpText": "Sign in to Antigravity CLI with `agy` to refresh account quota." if quota_status else "",
+    "quotaUpdatedAt": dt.datetime.now(dt.timezone.utc).isoformat() if quota_ok else old_status_at,
+    "quotaStatusText": "" if quota_ok else quota_status}
+  record.update(stats)
+  write_json(path, record, mode=0o600)
+  return 0
 
 
 def client_version() -> str:
@@ -1139,6 +1781,9 @@ def main() -> int:
   parser.add_argument("--limits-only", action="store_true", help="reuse any recent session scan; only billing must be fresh")
   parser.add_argument("--cache-seconds", type=float, default=SCAN_REUSE_SECONDS)
   parser.add_argument("--write", action="store_true", help="also write the Grok record to the Omarchy usage directory")
+  parser.add_argument("--write-deepseek", action="store_true", help="write a DeepSeek Harness detection record")
+  parser.add_argument("--write-deepseek-balance", action="store_true", help="refresh the DeepSeek account balance only")
+  parser.add_argument("--write-google", action="store_true", help="write Antigravity local usage and Gemini quota")
   parser.add_argument("--load-json", metavar="PATH", help="bounded no-follow JSON object read for QML")
   parser.add_argument("--load-text", metavar="PATH", help="bounded no-follow single-line text read for QML")
   parser.add_argument("--list-usage", metavar="DIR", help="list safe usage-record ids in a directory")
@@ -1161,6 +1806,12 @@ def main() -> int:
     return remember_codex_limits()
   if args.repair_codex:
     return repair_codex_record()
+  if args.write_deepseek:
+    return write_deepseek_record()
+  if args.write_deepseek_balance:
+    return write_deepseek_balance_record()
+  if args.write_google:
+    return write_antigravity_record(force=args.force)
 
   scan_age = 0 if args.force else (LIMITS_ONLY_REUSE_SECONDS if args.limits_only else args.cache_seconds)
   stats = cached_scan(grok_home() / "sessions", scan_age)

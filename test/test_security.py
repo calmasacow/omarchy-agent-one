@@ -180,6 +180,145 @@ class FileTrustTests(unittest.TestCase):
     self.assertFalse(mod.is_safe_agent_id("a" * 65))
 
 
+class DeepSeekBalanceTests(unittest.TestCase):
+  def test_today_counts_only_whole_sessions_started_today(self):
+    with tempfile.TemporaryDirectory() as raw:
+      root = Path(raw)
+      today = mod.dt.datetime.combine(mod.dt.date.today(), mod.dt.time(12)).astimezone()
+      yesterday = today - mod.dt.timedelta(days=1)
+      def write_projection(name, created, tokens, turns):
+        path = root / (name + ".json")
+        path.write_text(__import__("json").dumps({"record": {
+          "identity": {"createdAt": int(created.timestamp() * 1000), "isSeeded": False, "inheritedEventCount": 0},
+          "rows": {
+            "tokenUsage": {"val": {"totals": {
+              "uncachedInputTokens": tokens, "outputTokens": 0,
+              "cacheReadTokens": 0, "cacheWriteTokens": 0,
+            }}},
+            "sessionStats": {"val": {"turns": turns}},
+          },
+        }}), encoding="utf-8")
+      write_projection("today", today, 125, 2)
+      write_projection("older", yesterday, 900, 7)
+      stats = mod.deepseek_projection_stats(root)
+    self.assertEqual(stats["totalTokenCount"], 1025)
+    self.assertEqual(stats["totalPrompts"], 9)
+    self.assertEqual(stats["todayTotalTokens"], 125)
+    self.assertEqual(stats["todayPrompts"], 2)
+    self.assertEqual(stats["todaySessions"], 1)
+    self.assertTrue(stats["hasDailyStats"])
+    self.assertIn("sessions started before today", stats["dailyStatsNote"])
+
+  def test_api_balance_parses_provider_total_without_inventing_spend(self):
+    original = mod.deepseek_fetch
+    mod.deepseek_fetch = lambda url, headers: {
+      "is_available": True,
+      "balance_infos": [
+        {"currency": "CNY", "total_balance": "12.50", "granted_balance": "2.50", "topped_up_balance": "10.00"},
+        {"currency": "USD", "total_balance": "3.25", "granted_balance": "0.25", "topped_up_balance": "3.00"},
+      ],
+    }
+    try:
+      balance = mod.api_deepseek_balance("test-key")
+    finally:
+      mod.deepseek_fetch = original
+    self.assertEqual(balance["remaining"], "3.25")
+    self.assertEqual(balance["currency"], "USD")
+    self.assertEqual(balance["funded"], 0)
+    self.assertEqual(balance["spent"], 0)
+
+  def test_oauth_balance_uses_summary_wallets_and_platform_grant(self):
+    original = mod.deepseek_fetch
+    captured = {}
+    def fake_fetch(url, headers):
+      captured.update({"url": url, "headers": headers})
+      return {"code": 0, "data": {"biz_code": 0, "biz_data": {
+        "normal_wallets": [{"currency": "USD", "balance": "4.00"}],
+        "bonus_wallets": [{"currency": "USD", "balance": "1.25"}],
+      }}}
+    mod.deepseek_fetch = fake_fetch
+    try:
+      balance = mod.oauth_deepseek_balance("test-grant", "https://platform.deepseek.com")
+    finally:
+      mod.deepseek_fetch = original
+    self.assertEqual(captured["url"], "https://platform.deepseek.com/api/v0/users/get_user_summary")
+    self.assertEqual(captured["headers"]["x-dsh-auth-token"], "test-grant")
+    self.assertEqual(balance["remaining"], "5.25")
+    self.assertEqual(balance["currency"], "USD")
+
+  def test_oauth_balance_refuses_unrecognized_issuer_before_network(self):
+    original = mod.deepseek_fetch
+    mod.deepseek_fetch = lambda *args: self.fail("must not send grant to an unrecognized origin")
+    try:
+      with self.assertRaises(ValueError):
+        mod.oauth_deepseek_balance("test-grant", "https://evil.example")
+    finally:
+      mod.deepseek_fetch = original
+
+  def test_profile_route_detected_for_auth_selection(self):
+    with tempfile.TemporaryDirectory() as raw:
+      home = Path(raw)
+      profile = home / "profiles" / "desktop"
+      profile.mkdir(parents=True)
+      (profile / "cordis.patch.yml").write_text(
+        "- id: agent-default-model\n  config:\n    provider: deepseek-official\n"
+        "- id: llm-deepseek-api-key\n  config:\n    apiKeyEnv: CUSTOM_DSH_KEY\n", encoding="utf-8",
+      )
+      before_home = os.environ.get("DSH_HOME")
+      before_profile = os.environ.get("DSH_PROFILE")
+      os.environ["DSH_HOME"] = raw
+      os.environ["DSH_PROFILE"] = "desktop"
+      try:
+        self.assertEqual(mod.deepseek_profile_provider(), "deepseek-official")
+        self.assertEqual(mod.deepseek_api_key_ref(), "CUSTOM_DSH_KEY")
+      finally:
+        if before_home is None:
+          os.environ.pop("DSH_HOME", None)
+        else:
+          os.environ["DSH_HOME"] = before_home
+        if before_profile is None:
+          os.environ.pop("DSH_PROFILE", None)
+        else:
+          os.environ["DSH_PROFILE"] = before_profile
+
+  def test_balance_source_follows_active_model_route(self):
+    originals = (
+      mod.deepseek_balance_credentials, mod.deepseek_profile_provider,
+      mod.api_deepseek_balance, mod.oauth_deepseek_balance,
+    )
+    mod.deepseek_balance_credentials = lambda: ("api-key", "oauth-grant", {"issuer": "https://platform.deepseek.com"})
+    mod.deepseek_profile_provider = lambda: "deepseek-official"
+    mod.api_deepseek_balance = lambda key: {"remaining": "2.00", "funded": 0, "spent": 0, "currency": "USD"}
+    mod.oauth_deepseek_balance = lambda *args: self.fail("selected API route should win")
+    record = {}
+    try:
+      mod.refresh_deepseek_balance(record, None)
+    finally:
+      (mod.deepseek_balance_credentials, mod.deepseek_profile_provider,
+       mod.api_deepseek_balance, mod.oauth_deepseek_balance) = originals
+    self.assertEqual(record["balanceSource"], "API key")
+    self.assertEqual(record["balance"]["remaining"], "2.00")
+
+  def test_failed_primary_auth_preserves_last_balance_without_switching_account(self):
+    originals = (
+      mod.deepseek_balance_credentials, mod.deepseek_profile_provider,
+      mod.api_deepseek_balance, mod.oauth_deepseek_balance,
+    )
+    mod.deepseek_balance_credentials = lambda: ("api-key", "oauth-grant", {"issuer": "https://platform.deepseek.com"})
+    mod.deepseek_profile_provider = lambda: "deepseek-official"
+    mod.api_deepseek_balance = lambda key: (_ for _ in ()).throw(TimeoutError())
+    mod.oauth_deepseek_balance = lambda *args: self.fail("must not silently switch account after a query failure")
+    previous = {"balance": {"remaining": "8.00", "funded": 0, "spent": 0, "currency": "USD"}, "balanceSource": "API key"}
+    record = {}
+    try:
+      mod.refresh_deepseek_balance(record, previous)
+    finally:
+      (mod.deepseek_balance_credentials, mod.deepseek_profile_provider,
+       mod.api_deepseek_balance, mod.oauth_deepseek_balance) = originals
+    self.assertEqual(record["balance"], previous["balance"])
+    self.assertEqual(record["balanceSource"], "API key")
+
+
 class ParseLimitsTests(unittest.TestCase):
   def test_weekly_pool_and_product_segments(self):
     limits = mod.parse_limits({
@@ -206,6 +345,39 @@ class ParseLimitsTests(unittest.TestCase):
     self.assertEqual(mod.product_title("GrokBuild"), "Grok Build")
     self.assertEqual(mod.product_title("GrokChat"), "Chat")
     self.assertEqual(mod.product_title("GrokImagine"), "Imagine")
+
+
+class AntigravityTests(unittest.TestCase):
+  def test_quota_parser_keeps_only_gemini_remaining_windows(self):
+    limits = mod.parse_antigravity_usage_report(
+      "Gemini Models\tWeekly Limit Remaining\t82%\t2026-10-11T12:00:00Z\n"
+      "Gemini Models\tFive Hour Limit Remaining\t64%\t2026-10-04T18:00:00Z\n"
+      "Claude Weekly Limit Remaining 99% [2026-10-11T12:00:00Z]\n"
+    )
+    self.assertEqual([item["title"] for item in limits], ["Weekly", "5-hour"])
+    self.assertAlmostEqual(limits[0]["percent"], 0.18)
+    self.assertEqual(limits[1]["resetsAt"], "2026-10-04T18:00:00+00:00")
+
+  def test_transcript_aggregates_counters_without_prompt_content(self):
+    with tempfile.TemporaryDirectory() as raw:
+      root = Path(raw)
+      transcript = root / "brain" / "session" / ".system_generated" / "logs" / "transcript.jsonl"
+      transcript.parent.mkdir(parents=True)
+      today = mod.dt.datetime.now().astimezone().isoformat()
+      transcript.write_text(
+        '{"type":"USER_INPUT","status":"DONE","created_at":' + __import__("json").dumps(today)
+        + ',"content":"PRIVATE PROMPT TEXT"}\n'
+        + '{"type":"PLANNER_RESPONSE","status":"DONE","created_at":' + __import__("json").dumps(today)
+        + ',"input_tokens":100,"cache_read_tokens":30,"output_tokens":20,"content":"PRIVATE RESPONSE"}\n',
+        encoding="utf-8",
+      )
+      stats = mod.antigravity_transcript_stats(root)
+    self.assertEqual(stats["todayTotalTokens"], 120)
+    self.assertEqual(stats["todayUncachedInputTokens"], 70)
+    self.assertEqual(stats["todayCacheReadTokens"], 30)
+    self.assertEqual(stats["todayOutputTokens"], 20)
+    self.assertEqual(stats["todayPrompts"], 1)
+    self.assertNotIn("content", stats)
 
 
 class ScanSkipTests(unittest.TestCase):

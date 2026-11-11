@@ -32,6 +32,25 @@ Panel {
     return 0
   }
   readonly property var provider: providers.length > 0 ? providers[providerIndex] : null
+  readonly property var providerRows: {
+    var rows = []
+    var count = providers.length
+    if (count === 0) return rows
+    var rowCount = Math.ceil(count / 3)
+    var rowSize = Math.floor(count / rowCount)
+    var largerRows = count % rowCount
+    var offset = 0
+    for (var row = 0; row < rowCount; row++) {
+      var size = rowSize + (row < largerRows ? 1 : 0)
+      var items = []
+      for (var col = 0; col < size; col++) {
+        items.push({ provider: providers[offset], providerIndex: offset })
+        offset++
+      }
+      rows.push(items)
+    }
+    return rows
+  }
 
   property bool cursorActive: false
 
@@ -84,7 +103,10 @@ Panel {
   }
 
   function launchAgent() {
-    if (root.bar) root.bar.run("omarchy-agent --pick")
+    if (root.bar) {
+      if (provider && provider.providerId === "deepseek") root.bar.run("deepseek-harness")
+      else root.bar.run("omarchy-agent --pick")
+    }
     root.close()
   }
 
@@ -163,7 +185,8 @@ Panel {
     var isGrok = String(p.providerId || "").toLowerCase() === "grok"
     var isCodex = String(p.providerId || "").toLowerCase() === "codex"
     var isClaude = String(p.providerId || "").toLowerCase() === "claude"
-    var emphasizesLimits = isCodex || isClaude
+    var isGoogle = String(p.providerId || "").toLowerCase() === "google"
+    var emphasizesLimits = isCodex || isClaude || isGoogle
     var out = []
     for (var i = 0; i < list.length; i++) {
       var entry = list[i] || {}
@@ -189,6 +212,7 @@ Panel {
         inlineReset: inlineReset,
         emphasizesLimits: emphasizesLimits,
         claude: isClaude,
+        google: isGoogle,
       })
     }
     return out
@@ -279,6 +303,9 @@ Panel {
   }
 
   function cacheHitRate(p) {
+    if (p && p.hasCacheStats === false) return -1
+    if (p && p.cacheHitRate !== undefined && p.cacheHitRate !== null)
+      return Number(p.cacheHitRate)
     var usageByModel = p ? (p.modelUsage || {}) : {}
     var read = 0
     var total = 0
@@ -294,7 +321,7 @@ Panel {
 
   function formatCacheHit(n) {
     var rate = Number(n || 0)
-    if (!(rate >= 0)) rate = 0
+    if (!(rate >= 0)) return "—"
     return (rate * 100).toFixed(1) + "%"
   }
 
@@ -370,6 +397,7 @@ Panel {
   function heroMeta(p) {
     if (!p) return ""
     if (String(p.usageStatusText || "") !== "") return p.usageStatusText
+    if (String(p.sourceStatusText || "") !== "") return p.sourceStatusText
     var tier = String(p.tierLabel || "")
     if (tier === "") return "Subscription"
     return tier.charAt(0).toUpperCase() + tier.slice(1)
@@ -704,38 +732,44 @@ Panel {
           }
 
           // ---------- Provider switch ----------
-          Grid {
+          Column {
             id: providerSwitch
             visible: root.providers.length > 1
             width: parent.width
-            columns: Math.min(3, root.providers.length)
             spacing: Style.spacing.md
 
-            readonly property real cellWidth: root.providers.length > 0
-              ? (width - spacing * (columns - 1)) / columns
-              : 0
-
             Repeater {
-              model: root.providers
+              model: root.providerRows
 
-              Button {
+              delegate: Row {
+                id: providerRow
                 required property var modelData
-                required property int index
+                width: providerSwitch.width
+                spacing: Style.spacing.md
 
-                width: providerSwitch.cellWidth
-                text: root.providerButtonLabel(modelData)
-                selected: index === root.providerIndex
-                hasCursor: root.cursorActive && index === root.providerIndex
-                bordered: true
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                fontSize: Style.font.bodySmall
-                verticalPadding: Style.spacing.controlPaddingY
-                onClicked: {
-                  root.cursorActive = true
-                  root.selectProvider(index)
+                Repeater {
+                  model: modelData
+
+                  delegate: Button {
+                    required property var modelData
+
+                    width: (providerSwitch.width - providerSwitch.spacing * (providerRow.modelData.length - 1))
+                      / providerRow.modelData.length
+                    text: root.providerButtonLabel(modelData.provider)
+                    selected: modelData.providerIndex === root.providerIndex
+                    hasCursor: root.cursorActive && modelData.providerIndex === root.providerIndex
+                    bordered: true
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    fontSize: Style.font.bodySmall
+                    verticalPadding: Style.spacing.controlPaddingY
+                    onClicked: {
+                      root.cursorActive = true
+                      root.selectProvider(modelData.providerIndex)
+                    }
+                    onHovered: function(isHovered) { if (isHovered) root.cursorActive = true }
+                  }
                 }
-                onHovered: function(isHovered) { if (isHovered) root.cursorActive = true }
               }
             }
           }
@@ -745,8 +779,10 @@ Panel {
             visible: !!root.provider && String(root.provider.usageStatusText || "") !== ""
             width: parent.width
             implicitHeight: statusText.implicitHeight + Style.spacing.xl * 2
-            color: root.alpha(root.urgent, 0.10)
-            borderSpec: Border.flat(root.alpha(root.urgent, 0.35), 1)
+            color: root.alpha(root.provider && root.provider.statusKind === "info" ? root.dim : root.urgent,
+              root.provider && root.provider.statusKind === "info" ? 0.07 : 0.10)
+            borderSpec: Border.flat(root.alpha(root.provider && root.provider.statusKind === "info" ? root.dim : root.urgent,
+              root.provider && root.provider.statusKind === "info" ? 0.20 : 0.35), 1)
             radius: Style.cornerRadius
 
             Text {
@@ -979,12 +1015,16 @@ Panel {
               StatCard {
                 width: (todayGrid.width - todayGrid.columnSpacing) / 2
                 label: "Tokens"
-                value: root.provider ? usage.formatTokenCount(Number(root.provider.todayTotalTokens || 0)) : "—"
+                value: root.provider && root.provider.hasDailyStats !== false
+                  ? usage.formatTokenCount(Number(root.provider.todayTotalTokens || 0))
+                  : "—"
               }
               StatCard {
                 width: (todayGrid.width - todayGrid.columnSpacing) / 2
                 label: "Prompts"
-                value: root.provider && root.provider.hasPromptStats !== false
+                value: root.provider && root.provider.hasDailyStats !== false
+                  && root.provider.hasDailyPromptStats !== false
+                  && root.provider.hasPromptStats !== false
                   ? String(Number(root.provider.todayPrompts || 0))
                   : "—"
               }
@@ -1019,8 +1059,11 @@ Panel {
 
               StatCard {
                 width: (detailsGrid.width - detailsGrid.columnSpacing) / 2
-                label: "Sessions"
-                value: root.provider ? String(Number(root.provider.todaySessions || 0)) : "—"
+                label: root.provider && root.provider.hasDailyStats === false ? "All-time sessions" : "Sessions"
+                value: root.provider && root.provider.hasDailyStats === false
+                  ? String(Number(root.provider.allTimeSessions || 0))
+                  : root.provider && root.provider.hasDailyStats !== false
+                    ? String(Number(root.provider.todaySessions || 0)) : "—"
               }
               StatCard {
                 width: (detailsGrid.width - detailsGrid.columnSpacing) / 2
@@ -1037,7 +1080,15 @@ Panel {
               StatCard {
                 width: (detailsGrid.width - detailsGrid.columnSpacing) / 2
                 label: "Active days"
-                value: root.provider ? String(Number(root.provider.activeDays || 0)) : "—"
+                value: root.provider && root.provider.hasActiveDayStats !== false
+                  ? String(Number(root.provider.activeDays || 0)) : "—"
+              }
+              StatCard {
+                visible: !!root.provider && root.provider.allTimeTokens !== null
+                width: (detailsGrid.width - detailsGrid.columnSpacing) / 2
+                label: "All-time tokens"
+                value: root.provider && root.provider.allTimeTokens !== null
+                  ? usage.formatTokenCount(Number(root.provider.allTimeTokens || 0)) : "—"
               }
             }
 
@@ -1313,8 +1364,9 @@ Panel {
       value: limitRow.window ? limitRow.window.percent : -1
       alarming: limitRow.alarming
       thicknessMultiplier: limitRow.window && limitRow.window.emphasizesLimits ? 2 : 1
-      fillColor: limitRow.window && limitRow.window.claude ? "#D97757" : root.foreground
-      trackColor: root.track
+      fillColor: limitRow.window && limitRow.window.google ? "#3286FF"
+        : (limitRow.window && limitRow.window.claude ? "#D97757" : root.foreground)
+      trackColor: limitRow.window && limitRow.window.google ? "#E3E3E3" : root.track
     }
 
     Text {
@@ -1336,7 +1388,7 @@ Panel {
     }
   }
 
-  // Rounded track showing the percentage of the allowance used.
+  // Rounded track showing the remaining share of an allowance.
   component Meter: Item {
     id: meter
     property real value: -1

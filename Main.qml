@@ -237,6 +237,20 @@ Item {
   property string pendingUpdateKind: ""
 
   Timer {
+    interval: 300000
+    running: root.providerEnabled("deepseek")
+    repeat: true
+    onTriggered: root.runUpdate("deepseek-balance")
+  }
+
+  Timer {
+    interval: 300000
+    running: root.providerEnabled("google")
+    repeat: true
+    onTriggered: root.runUpdate("google-quota")
+  }
+
+  Timer {
     interval: root.refreshIntervalSec * 1000
     running: true
     repeat: true
@@ -280,6 +294,12 @@ Item {
   }
 
   function updateCommand(kind, agentIds) {
+    if (kind === "deepseek-balance") {
+      return ["bash", "-c", 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --write-deepseek-balance; fi', root.agentOneHelper]
+    }
+    if (kind === "google-quota") {
+      return ["bash", "-c", 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --write-google; fi', root.agentOneHelper]
+    }
     var args = updateArgs(kind, agentIds)
     var grokFlags = ""
     if (kind === "force") grokFlags = " --force"
@@ -289,6 +309,13 @@ Item {
     var grokPart = providerEnabled("grok") && root.agentOneHelper !== ""
       ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --write' + grokFlags + '; fi; '
       : ""
+    var deepseekPart = providerEnabled("deepseek") && root.agentOneHelper !== ""
+      ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --write-deepseek; fi; '
+      : ""
+    var googleFlags = kind === "force" ? " --force" : ""
+    var googlePart = providerEnabled("google") && root.agentOneHelper !== ""
+      ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --write-google' + googleFlags + '; fi; '
+      : ""
     var repairPart = root.agentOneHelper !== ""
       ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --repair-codex; fi; '
       : ""
@@ -296,7 +323,7 @@ Item {
       ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --remember-codex-limits; fi; '
       : ""
     var script = rememberPart + 'omarchy-agent-usage-update "$@"; status=$?; '
-      + repairPart + grokPart + 'exit $status'
+      + repairPart + grokPart + deepseekPart + googlePart + 'exit $status'
     return ["bash", "-c", script, root.agentOneHelper].concat(args)
   }
 
@@ -385,7 +412,8 @@ Item {
     return numberValue(p.totalPrompts) > 0 || numberValue(p.totalSessions) > 0
       || numberValue(p.activeDays) > 0 || numberValue(p.todayPrompts) > 0
       || numberValue(p.todaySessions) > 0 || (p.limits && p.limits.length > 0)
-      || !!p.balance
+      || !!p.balance || p.detected === true || numberValue(p.totalTokenCount) > 0
+      || numberValue(p.allTimeTokens) > 0
   }
 
   // A prepaid agent's credit ledger. Like rate limits, the balance is
@@ -450,6 +478,23 @@ Item {
       modelUsage: synced ? (stats.modelUsage || ({})) : (record.modelUsage || ({})),
       hasLocalStats: synced ? (stats.hasLocalStats !== false) : (record.hasLocalStats !== false),
       hasPromptStats: synced ? (stats.hasPromptStats !== false) : (record.hasPromptStats !== false),
+      hasDailyPromptStats: synced ? (stats.hasDailyPromptStats !== false) : (record.hasDailyPromptStats !== false),
+      hasDailyStats: synced ? (stats.hasDailyStats !== false) : (record.hasDailyStats !== false),
+      hasActiveDayStats: synced ? (stats.hasActiveDayStats !== false) : (record.hasActiveDayStats !== false),
+      hasCacheStats: synced ? (stats.hasCacheStats === true) : (record.hasCacheStats === true),
+      allTimeTokens: synced
+        ? (stats.totalTokenCount === undefined ? null : numberValue(stats.totalTokenCount))
+        : (record.totalTokenCount === undefined ? null : numberValue(record.totalTokenCount)),
+      allTimeSessions: synced ? numberValue(stats.totalSessions) : numberValue(record.totalSessions),
+      cacheHitRate: synced ? stats.cacheHitRate : record.cacheHitRate,
+      detected: record.detected === true,
+      sourceStatusText: String(record.sourceStatusText || (synced && String(record.id) === "deepseek"
+        ? "DeepSeek Harness local usage" : (synced && String(record.id) === "google"
+          ? "Antigravity CLI" : ""))),
+      authHelpText: recordHelp || (synced && String(record.id) === "deepseek"
+        ? "All-time tokens come from local Harness session projections. Daily breakdowns and account quotas are unavailable."
+        : recordHelp),
+      statusKind: String(record.statusKind || "warning"),
 
       syncEnabled: synced,
       syncDeviceCount: deviceCount,
@@ -751,6 +796,17 @@ Item {
         ready: false,
         hasLocalStats: false,
         hasPromptStats: false,
+        hasDailyPromptStats: true,
+        hasDailyStats: true,
+        hasActiveDayStats: true,
+        hasCacheStats: false,
+        hasAllTimeTokens: false,
+        cacheHitRate: null,
+        totalTokenCount: 0,
+        uncachedInputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
         todayPrompts: 0,
         todaySessions: 0,
         todayTotalTokens: 0,
@@ -781,12 +837,25 @@ Item {
         // Snapshots from before the field existed only came from agents that
         // count prompts, so a missing value reads as true.
         acc.hasPromptStats = acc.hasPromptStats || stats.hasPromptStats !== false
+        acc.hasDailyPromptStats = acc.hasDailyPromptStats && stats.hasDailyPromptStats !== false
+        acc.hasDailyStats = acc.hasDailyStats && stats.hasDailyStats !== false
+        acc.hasActiveDayStats = acc.hasActiveDayStats && stats.hasActiveDayStats !== false
+        acc.hasCacheStats = acc.hasCacheStats || stats.hasCacheStats === true
+        acc.hasAllTimeTokens = acc.hasAllTimeTokens
+          || (stats.totalTokenCount !== undefined && stats.totalTokenCount !== null)
         var additive = String(stats.scope || "device") !== "account"
         acc.todayPrompts = combineNumber(additive, acc.todayPrompts, stats.todayPrompts)
         acc.todaySessions = combineNumber(additive, acc.todaySessions, stats.todaySessions)
         acc.todayTotalTokens = combineNumber(additive, acc.todayTotalTokens, stats.todayTotalTokens)
         acc.totalPrompts = combineNumber(additive, acc.totalPrompts, stats.totalPrompts)
         acc.totalSessions = combineNumber(additive, acc.totalSessions, stats.totalSessions)
+        acc.totalTokenCount = combineNumber(additive, acc.totalTokenCount, stats.totalTokenCount)
+        acc.uncachedInputTokens = combineNumber(additive, acc.uncachedInputTokens, stats.uncachedInputTokens)
+        acc.outputTokens = combineNumber(additive, acc.outputTokens, stats.outputTokens)
+        acc.cacheReadTokens = combineNumber(additive, acc.cacheReadTokens, stats.cacheReadTokens)
+        acc.cacheWriteTokens = combineNumber(additive, acc.cacheWriteTokens, stats.cacheWriteTokens)
+        var cacheInput = acc.uncachedInputTokens + acc.cacheReadTokens + acc.cacheWriteTokens
+        acc.cacheHitRate = cacheInput > 0 ? acc.cacheReadTokens / cacheInput : null
         // Active days overlap between machines, so union the dates rather than
         // summing counts. Snapshots written before activeDates existed only
         // carry a count; the widest one stands in for them.
@@ -824,6 +893,16 @@ Item {
         ready: acc.ready || providerDevices.length > 0,
         hasLocalStats: acc.hasLocalStats,
         hasPromptStats: acc.hasPromptStats,
+        hasDailyPromptStats: acc.hasDailyPromptStats,
+        hasDailyStats: acc.hasDailyStats,
+        hasActiveDayStats: acc.hasActiveDayStats,
+        hasCacheStats: acc.hasCacheStats,
+        totalTokenCount: acc.hasAllTimeTokens ? acc.totalTokenCount : undefined,
+        uncachedInputTokens: acc.uncachedInputTokens,
+        outputTokens: acc.outputTokens,
+        cacheReadTokens: acc.cacheReadTokens,
+        cacheWriteTokens: acc.cacheWriteTokens,
+        cacheHitRate: acc.cacheHitRate,
         todayPrompts: acc.todayPrompts,
         todaySessions: acc.todaySessions,
         todayTotalTokens: acc.todayTotalTokens,
@@ -857,6 +936,10 @@ Item {
       ready: record.ready === true,
       hasLocalStats: record.hasLocalStats !== false,
       hasPromptStats: record.hasPromptStats !== false,
+      hasDailyPromptStats: record.hasDailyPromptStats !== false,
+      hasDailyStats: record.hasDailyStats !== false,
+      hasActiveDayStats: record.hasActiveDayStats !== false,
+      hasCacheStats: record.hasCacheStats === true,
       scope: String(record.scope || "device"),
       todayPrompts: numberValue(record.todayPrompts),
       todaySessions: numberValue(record.todaySessions),
@@ -865,6 +948,11 @@ Item {
       recentDays: cloneValue(record.recentDays, []),
       totalPrompts: numberValue(record.totalPrompts),
       totalSessions: numberValue(record.totalSessions),
+      totalTokenCount: numberValue(record.totalTokenCount),
+      uncachedInputTokens: numberValue(record.uncachedInputTokens),
+      outputTokens: numberValue(record.outputTokens),
+      cacheReadTokens: numberValue(record.cacheReadTokens),
+      cacheWriteTokens: numberValue(record.cacheWriteTokens),
       activeDays: numberValue(record.activeDays),
       activeDates: cloneValue(record.activeDates, []),
       modelUsage: cloneValue(record.modelUsage, ({}))
