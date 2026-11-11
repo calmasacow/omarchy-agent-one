@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <clipPath id="clip-path-2">
+      <path d="M1 7.204 L512 7.204 L512 504.796 L1 504.796 Z"/>
+    </clipPath>
+    <mask id="mask-1" maskUnits="userSpaceOnUse" color-interpolation="sRGB" x="-1" y="5.204" width="515" height="501.592">
+    <rect x="1" y="7.204" width="511" height="497.592" fill="#ffffff"/>
+    </mask>
+    <linearGradient id="linear-gradient-1" x1="254.903" y1="256" x2="254.903" y2="504.796" gradientUnits="userSpaceOnUse">
+      <stop offset="0.16" stop-color="#ffffff" stop-opacity="0.39"/>
+      <stop offset="0.658" stop-color="#ffffff" stop-opacity="0.8"/>
+    </linearGradient>
+    <linearGradient id="linear-gradient-2" x1="476.869" y1="132.369" x2="257.963" y2="264.189" gradientUnits="userSpaceOnUse">
+      <stop offset="0.182" stop-color="#ffffff" stop-opacity="0.31"/>
+      <stop offset="0.715" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="linear-gradient-3" x1="254.903" y1="7.204" x2="41.66" y2="385.317" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.6"/>
+      <stop offset="0.667" stop-color="#ffffff" stop-opacity="0.22"/>
+    </linearGradient>
+  </defs>
+  <title>Cursor</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <g clip-path="url(#clip-path-2)">
+      <g mask="url(#mask-1)">
+        <g>
+          <g>
+            <polygon points="254.903,504.796 476.869,380.398 254.903,256 32.938,380.398" fill="url(#linear-gradient-1)"/>
+            <polygon points="476.869,380.398 476.869,131.602 254.903,7.204 254.903,256" fill="url(#linear-gradient-2)"/>
+            <polygon points="254.903,7.204 32.938,131.602 32.938,380.398 254.903,256" fill="url(#linear-gradient-3)"/>
+            <polygon points="476.869,131.602 254.903,504.796 254.903,256" fill="#e4e4e4"/>
+            <polygon points="476.869,131.602 254.903,256 32.938,131.602" fill="#ffffff"/>
+          </g>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>
