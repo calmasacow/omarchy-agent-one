@@ -67,6 +67,8 @@ DEEPSEEK_ACCOUNT_KEY = "deepseek-account-platform/default"
 DEEPSEEK_API_KEY_RECORD = "llm-deepseek-api-key/deepseek-official"
 MAX_SUMMARY_BYTES = 64 * 1024
 MAX_USAGE_FILES = 16
+TRACKED_IDS = {"claude", "codex", "grok", "grokbot", "google", "cursor",
+               "deepseek", "opencode", "pi", "qwen", "openrouter"}
 MAX_SNAPSHOT_FILES = 32
 AGENT_ID_MAX_LEN = 64
 CREDENTIAL_HEADERS = frozenset({
@@ -1660,7 +1662,7 @@ def list_usage_records(usage_path: Path) -> dict[str, Any]:
   if not usage_path.is_dir() or usage_path.is_symlink():
     return {"ids": ids}
   try:
-    names = sorted(os.listdir(usage_path))
+    names = sorted(os.listdir(usage_path), key=lambda name: (name[:-5] not in TRACKED_IDS, name))
   except OSError:
     return {"ids": ids}
   for name in names:

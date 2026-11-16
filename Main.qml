@@ -251,6 +251,13 @@ Item {
   }
 
   Timer {
+    interval: 300000
+    running: root.providerEnabled("openrouter")
+    repeat: true
+    onTriggered: root.runUpdate("openrouter")
+  }
+
+  Timer {
     interval: root.refreshIntervalSec * 1000
     running: true
     repeat: true
@@ -300,6 +307,9 @@ Item {
     if (kind === "google-quota") {
       return ["bash", "-c", 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --write-google; fi', root.agentOneHelper]
     }
+    if (kind === "openrouter") {
+      return ["python3", "-B", root.pluginDir + "/scripts/omarchy-agent-one-openrouter", "--write", "--limits-only"]
+    }
     var args = updateArgs(kind, agentIds)
     var grokFlags = ""
     if (kind === "force") grokFlags = " --force"
@@ -322,8 +332,11 @@ Item {
     var rememberPart = root.agentOneHelper !== ""
       ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --remember-codex-limits; fi; '
       : ""
+    var openrouterPart = providerEnabled("openrouter")
+      ? 'python3 -B "${0%/*}/omarchy-agent-one-openrouter" --write' + grokFlags + '; '
+      : ""
     var script = rememberPart + 'omarchy-agent-usage-update "$@"; status=$?; '
-      + repairPart + grokPart + deepseekPart + googlePart + 'exit $status'
+      + repairPart + grokPart + deepseekPart + googlePart + openrouterPart + 'exit $status'
     return ["bash", "-c", script, root.agentOneHelper].concat(args)
   }
 
@@ -352,7 +365,15 @@ Item {
   // settings and having actually produced numbers — locally or on a synced
   // device. With nothing to show, the whole module collapses out of the bar
   // rather than sitting there dimmed.
-  property var enabledProviders: {
+  readonly property var enabledProviders: {
+    var result = trackedProviders.filter(function(p) { return p.providerId !== "grokbot" })
+    if (trackedProviders.some(function(p) { return p.providerId === "grokbot" })
+        && !result.some(function(p) { return p.providerId === "grok" }))
+      result.push(displayProvider({ id: "grok", name: "Grok", hasLocalStats: false }))
+    return result
+  }
+
+  property var trackedProviders: {
     var rev = dataRevision
     var syncRev = syncRevision
     var preferred = String(root.defaultAgentId || "")
@@ -390,6 +411,7 @@ Item {
   }
 
   function providerEnabled(id) {
+    if (id === "grokbot") return providerEnabled("grok")
     var supported = {
       claude: true,
       codex: true,
@@ -399,7 +421,8 @@ Item {
       deepseek: true,
       opencode: true,
       pi: true,
-      qwen: true
+      qwen: true,
+      openrouter: true
     }
     if (supported[id] !== true) return false
     if (!settings || !settings.providers || !settings.providers[id]) return true
@@ -466,6 +489,7 @@ Item {
       limits: recordLimits,
       tierLabel: String(record.tierLabel || ""),
       balance: balanceValue(record.balance),
+      activity: record.activity || null,
 
       todayPrompts: synced ? numberValue(stats.todayPrompts) : numberValue(record.todayPrompts),
       todaySessions: synced ? numberValue(stats.todaySessions) : numberValue(record.todaySessions),

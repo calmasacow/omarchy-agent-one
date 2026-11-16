@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "calmasacow.agent-one",
   "name": "Omarchy Agent One",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": "James Barnette",
   "license": "MIT",
   "description": "Usage dashboard for coding agents on the Omarchy agents panel.",
@@ -26,7 +26,7 @@
   ],
   "barWidget": {
     "displayName": "Agent One",
-    "description": "Usage dashboard for Codex, Claude, Grok, Google Gemini, Cursor, DeepSeek, OpenCode, Pi, and Qwen Code.",
+    "description": "Usage dashboard for Codex, Claude, Grok, Google Gemini, Cursor, DeepSeek, OpenCode, Pi, and Qwen Code. Includes OpenRouter credits and a combined overview.",
     "category": "Developer Tools",
     "aliases": [
       "agent one",
@@ -69,6 +69,9 @@
           "enabled": true
         },
         "qwen": {
+          "enabled": true
+        },
+        "openrouter": {
           "enabled": true
         }
       },

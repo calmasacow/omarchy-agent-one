@@ -8,7 +8,7 @@ Read `HANDOFF.md` and `TODO.md` before changing this project.
 - Separate local session statistics from account quota data. Only display a quota or billing figure when its source and meaning are known.
 - Open provider history, logs, and databases read-only. Never include account credentials, prompt text, or private usage records in the repository.
 - Preserve last-known-good usage when refreshes return empty, incomplete, or temporarily unavailable data.
-- Keep the nine selector IDs and labels documented in `README.md`; do not add unrelated providers to the selector.
+- Keep the original nine selector IDs and labels documented in `README.md`, plus the explicitly requested OpenRouter account and Overview. Keep Grok Bot inside Grok and Overview; do not add unrelated providers to the selector.
 - Work in the repository root, validate `manifest.json` with `omarchy plugin validate .`, and update `TODO.md` as work is completed.
 
 ## Current provider IDs

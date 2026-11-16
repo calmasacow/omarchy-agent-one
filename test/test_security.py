@@ -148,6 +148,15 @@ class FileTrustTests(unittest.TestCase):
     listed = mod.list_usage_records(self.root)
     self.assertEqual(listed["ids"], ["grok", "secret"])
 
+  def test_tracked_providers_survive_unrelated_record_limit(self):
+    for index in range(mod.MAX_USAGE_FILES + 1):
+      (self.root / f"aaa{index}.json").write_text("{}")
+    for agent_id in ("openrouter", "grokbot", "qwen"):
+      (self.root / f"{agent_id}.json").write_text("{}")
+    ids = mod.list_usage_records(self.root)["ids"]
+    self.assertLessEqual(len(ids), mod.MAX_USAGE_FILES)
+    self.assertTrue({"openrouter", "grokbot", "qwen"}.issubset(ids))
+
   def test_load_text_only_agent_basename_and_safe_id(self):
     agent = self.root / "agent"
     agent.write_text("grok\n", encoding="utf-8")

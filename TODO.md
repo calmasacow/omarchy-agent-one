@@ -13,10 +13,16 @@
 
 ## Panel and integration
 
+- [x] Add OpenRouter selector and integrate Usage Plus balance, analytics, local rated spend, settings, refresh, and standard usage records.
+- [x] Add Grok Bot's separate allowance and branded icon inside Grok and Overview using Omarchy's stock collector.
+- [x] Add a permanent first Overview button, selected on every open, listing tracked providers without inventing missing quotas.
+- [x] Let Overview grow to fit its contents, reserving 120 pixels above the screen bottom and scrolling only when needed.
+- [x] Add regression checks for selector navigation, OpenRouter fallback preservation, account data exclusion from sync snapshots, and provider discovery on machines with more than 16 usage records.
+
 - [x] Present the requested agents in balanced selector rows of up to three buttons.
 - [ ] Give each provider an accurate source/status label for local stats and account limits.
 - [x] Preserve last good Google token and quota data when a scan or quota refresh has no data.
 - [x] Integrate Google collector with Omarchy refresh, settings, and synchronized snapshots.
 - [ ] Add broader regression coverage for every collector and panel behavior.
-- [ ] Replace the Grok-specific preview with an Agent One panel preview.
+- [x] Replace the Grok-specific preview with the owner-provided Agent One overview screenshot.
 - [x] Create the private GitHub repository and document how to clone it.

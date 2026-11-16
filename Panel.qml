@@ -19,19 +19,26 @@ Panel {
   readonly property color track: Style.selectedFillFor(foreground, Color.accent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  readonly property var providers: usage.enabledProviders
+  readonly property var providers: [{ providerId: "overview", providerName: "Overview" }].concat(usage.enabledProviders)
   // The selection follows the provider, not the slot it happens to sit in: a
   // provider whose first scan lands while the panel is open would otherwise
   // shift the list underneath you and swap out what you were reading.
-  property string selectedProviderId: ""
+  property string selectedProviderId: "overview"
   readonly property int providerIndex: {
     var want = selectedProviderId
-    if (want === "") want = usage.defaultAgentId
+    if (want === "") want = "overview"
     for (var i = 0; i < providers.length; i++)
       if (providers[i].providerId === want) return i
     return 0
   }
-  readonly property var provider: providers.length > 0 ? providers[providerIndex] : null
+  readonly property bool overviewSelected: providers[providerIndex].providerId === "overview"
+  readonly property var provider: overviewSelected ? null : providers[providerIndex]
+  readonly property var grokbot: {
+    var tracked = usage.trackedProviders
+    for (var i = 0; i < tracked.length; i++)
+      if (tracked[i].providerId === "grokbot") return tracked[i]
+    return null
+  }
   readonly property var providerRows: {
     var rows = []
     var count = providers.length
@@ -85,6 +92,8 @@ Panel {
   function providerButtonLabel(item) {
     var id = String(item && item.providerId || "")
     var names = {
+      overview: "Overview",
+      openrouter: "OpenRouter",
       claude: "Claude",
       codex: "Codex",
       grok: "Grok",
@@ -514,12 +523,13 @@ Panel {
   // Nothing to report, nothing in the bar: Bar.qml collapses a slot whose item
   // is invisible, so the icon appears the moment the first scan finds usage and
   // stays away entirely on a machine that has never run either CLI.
-  visible: providers.length > 0
+  visible: usage.trackedProviders.length > 0
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
   onProviderIndexChanged: if (panelFlick) panelFlick.contentY = 0
   onOpenedChanged: if (opened) {
+    selectedProviderId = "overview"
     cursorActive = false
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
@@ -573,9 +583,10 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
-    // Taller than the control panels on purpose: this one is a dashboard, and
-    // the whole point is reading limits and history without scrolling.
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(900))
+    // Overview grows to its contents, reserving 120 pixels at the screen edge.
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, root.overviewSelected
+      ? Math.max(1, panel.availableCardHeight - Math.max(0, 120 - panel.margin))
+      : Style.space(900))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -616,7 +627,7 @@ Panel {
           // ---------- Hero: provider mark · name · plan · remaining ----------
           Item {
             id: header
-            visible: !!root.provider
+            visible: true
             width: parent.width
             implicitHeight: hero.implicitHeight
             readonly property string amountText: root.remainingLabel(root.headline)
@@ -627,8 +638,8 @@ Panel {
             PanelHero {
               id: hero
               width: parent.width
-              title: root.provider ? root.provider.providerName : ""
-              meta: root.heroMeta(root.provider)
+              title: root.overviewSelected ? "Agents" : root.provider.providerName
+              meta: root.overviewSelected ? "Usage overview" : root.heroMeta(root.provider)
               foreground: root.foreground
               fontFamily: root.fontFamily
               trailingControl: Component {
@@ -771,6 +782,101 @@ Panel {
                   }
                 }
               }
+            }
+          }
+
+          Column {
+            visible: root.overviewSelected
+            width: parent.width
+            spacing: Style.space(16)
+
+            Repeater {
+              model: root.overviewSelected ? usage.trackedProviders : []
+              SummaryRow {
+                required property var modelData
+                width: parent.width
+                item: modelData
+                onChosen: {
+                  root.selectedProviderId = item.providerId === "grokbot" ? "grok" : item.providerId
+                }
+              }
+            }
+          }
+
+          SummaryRow {
+            visible: root.grokSelected && !!root.grokbot
+            width: parent.width
+            item: root.grokbot
+          }
+
+          Column {
+            visible: !!root.provider && root.provider.providerId === "openrouter"
+            width: parent.width
+            spacing: Style.space(10)
+            readonly property var activity: root.provider ? root.provider.activity : null
+            readonly property var days: root.provider ? root.provider.recentDays : []
+            readonly property real peak: Math.max.apply(null, [0.000001].concat(days.map(function(d) { return Number(d.cost || 0) })))
+            PanelSectionHeader {
+              text: "SPEND BY DAY · LOCAL PI/OMP"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+            Repeater {
+              model: parent.days
+              DayRow {
+                required property var modelData
+                width: parent.width
+                day: modelData
+                today: modelData.date === root.todayDate()
+                ratio: Number(modelData.cost || 0) / parent.peak
+                money: true
+              }
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: parent.activity ? "Activity · " + (parent.activity.source === "analytics" ? "OpenRouter account" : "Local pi/omp sessions")
+                + " · " + parent.activity.period : ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: parent.activity ? root.formatMoney(parent.activity.spend, "USD") + " spent · "
+                + parent.activity.requests + " requests · " + usage.formatTokenCount(parent.activity.tokens) + " tokens" : ""
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            Repeater {
+              model: parent.activity ? [
+                { title: "Models", rows: parent.activity.topModels || [] },
+                { title: "Apps", rows: parent.activity.topApps || [] },
+                { title: "Keys", rows: parent.activity.topKeys || [] }
+              ] : []
+              Text {
+                required property var modelData
+                textFormat: Text.PlainText
+                visible: modelData.rows.length > 0
+                width: parent.width
+                text: modelData.title + ": " + modelData.rows.map(function(r) {
+                  return r.name + " (" + usage.formatTokenCount(r.tokens) + ")"
+                }).join(" · ")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+            Row {
+              width: parent.width
+              LinkTile { width: parent.width / 3; icon: "󰐕"; label: "Add Credits"; url: "https://openrouter.ai/settings/credits" }
+              LinkTile { width: parent.width / 3; icon: "󰆍"; label: "Activity"; url: "https://openrouter.ai/activity" }
+              LinkTile { width: parent.width / 3; icon: "󰈙"; label: "Manage Keys"; url: "https://openrouter.ai/settings/keys" }
             }
           }
 
@@ -1175,6 +1281,120 @@ Panel {
     }
   }
 
+  component SummaryRow: Column {
+    id: summary
+    property var item: null
+    signal chosen()
+    spacing: Style.space(8)
+    readonly property var windows: item && item.providerId === "grok" && root.grokPoolWindow(item)
+      ? [root.grokPoolWindow(item)] : root.limitWindows(item)
+    readonly property var credit: item ? item.balance : null
+
+    PanelSeparator { width: parent.width; foreground: root.foreground }
+    Item {
+      width: parent.width
+      implicitHeight: Style.space(28)
+      Image {
+        id: summaryIcon
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        width: Style.space(20)
+        height: width
+        source: summary.item ? Qt.resolvedUrl("assets/" + summary.item.providerId
+          + (root.colorLuminance(root.surface) >= 0.5 && ["grok", "grokbot", "codex", "cursor", "openrouter"].indexOf(summary.item.providerId) >= 0 ? "-light" : "") + ".svg") : ""
+        fillMode: Image.PreserveAspectFit
+      }
+      Text {
+        textFormat: Text.PlainText
+        anchors.centerIn: summaryIcon
+        visible: summaryIcon.status !== Image.Ready
+        text: button.text
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+      }
+      Text {
+        textFormat: Text.PlainText
+        anchors.left: summaryIcon.right
+        anchors.leftMargin: Style.space(8)
+        anchors.right: summaryPlan.left
+        anchors.rightMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        text: summary.item ? summary.item.providerName : ""
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+        elide: Text.ElideRight
+      }
+      Text {
+        id: summaryPlan
+        textFormat: Text.PlainText
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        width: Math.min(implicitWidth, parent.width * 0.4)
+        text: summary.item ? summary.item.tierLabel : ""
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+      MouseArea {
+        anchors.fill: parent
+        cursorShape: Qt.PointingHandCursor
+        onClicked: summary.chosen()
+      }
+    }
+    Repeater {
+      model: summary.windows
+      Column {
+        required property var modelData
+        width: summary.width
+        spacing: Style.space(4)
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          text: modelData.title + " · " + root.remainingLabel(modelData) + " left"
+            + (root.resetMsFor(modelData) > 0 ? " · " + root.formatDuration(root.resetMsFor(modelData)) : "")
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+        Meter { width: parent.width; value: root.remainingPercent(modelData); alarming: value <= 0.1 }
+      }
+    }
+    Text {
+      textFormat: Text.PlainText
+      visible: !!summary.credit
+      width: parent.width
+      text: summary.credit ? "Balance · " + root.formatMoney(summary.credit.remaining, summary.credit.currency) : ""
+      color: root.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+    Meter {
+      visible: !!summary.credit && summary.credit.funded > 0
+      width: parent.width
+      value: summary.credit && summary.credit.funded > 0 ? summary.credit.remaining / summary.credit.funded : -1
+      alarming: value >= 0 && value <= 0.1
+    }
+    Text {
+      textFormat: Text.PlainText
+      visible: summary.windows.length === 0 && !summary.credit
+      width: parent.width
+      text: summary.item ? (summary.item.usageStatusText || (summary.item.hasLocalStats !== false
+        ? "Local tokens · " + usage.formatTokenCount(summary.item.hasDailyStats === false
+          ? summary.item.allTimeTokens : summary.item.todayTotalTokens)
+          + (summary.item.hasDailyStats === false ? " all time" : " today")
+        : "Quota unavailable")) : ""
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
+    }
+  }
+
   component LinkTile: Item {
     id: linkTile
     property string icon: ""
@@ -1428,6 +1648,7 @@ Panel {
   component DayRow: Item {
     id: dayRow
     property var day: null
+    property bool money: false
     property real ratio: 0
     property bool today: false
 
@@ -1474,7 +1695,8 @@ Panel {
     Text {
       textFormat: Text.PlainText
       id: dayValue
-      text: usage.formatTokenCount(dayRow.day ? Number(dayRow.day.messageCount || 0) : 0)
+      text: dayRow.money ? root.formatMoney(dayRow.day ? dayRow.day.cost : 0, "USD")
+        : usage.formatTokenCount(dayRow.day ? Number(dayRow.day.messageCount || 0) : 0)
       color: dayRow.today ? root.foreground : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
@@ -1494,7 +1716,8 @@ Panel {
 
     PanelToolTip {
       visible: dayHover.containsMouse
-      text: root.dayTooltip(dayRow.day, dayRow.today)
+      text: dayRow.money ? "Local rated cost · " + root.formatMoney(dayRow.day ? dayRow.day.cost : 0, "USD")
+        : root.dayTooltip(dayRow.day, dayRow.today)
       fontFamily: root.fontFamily
     }
   }
