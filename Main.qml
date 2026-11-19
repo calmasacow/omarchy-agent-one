@@ -542,7 +542,7 @@ Item {
   readonly property string syncEffectiveDir: expandPath(syncDir)
   readonly property string syncEffectiveFileName: safeSnapshotFileName(syncFileName, syncDeviceId)
   readonly property string syncEffectiveDeviceId: safeDeviceId(syncDeviceId || syncEffectiveFileName.replace(/\.json$/i, ""))
-  readonly property string syncSnapshotPath: syncConfigured() ? syncEffectiveDir + "/" + syncEffectiveFileName : home + "/.cache/omarchy/agents-disabled.json"
+  property string syncSnapshotPayload: ""
   property var aggregateData: ({})
   property int syncRevision: 0
   property bool syncRunning: false
@@ -611,13 +611,31 @@ Item {
     }
   }
 
-  FileView {
-    id: syncSnapshotFile
-    path: root.syncSnapshotPath
-    watchChanges: false
-    preload: false
-    atomicWrites: true
-    printErrors: false
+  // FileView atomicWrites uses QSaveFile, which follows a symlink at the
+  // snapshot name and replaces the file it points at. The helper renames
+  // inside the sync directory, so a planted symlink is replaced, not followed.
+  Process {
+    id: syncWriteProcess
+    running: false
+    stdinEnabled: true
+    onRunningChanged: root.updateSyncRunning()
+    onStarted: {
+      syncWriteProcess.write(root.syncSnapshotPayload)
+      syncWriteProcess.stdinEnabled = false
+    }
+    onExited: function(exitCode) {
+      root.syncSnapshotPayload = ""
+      if (exitCode !== 0) {
+        if (root.syncConfigured()) root.syncStatusText = "Usage sync write failed"
+        root.finishSyncRun()
+        return
+      }
+      root.startSyncScan()
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("agents/sync", text.trim())
+    }
   }
 
   FileView {
@@ -651,7 +669,7 @@ Item {
   }
 
   function updateSyncRunning() {
-    root.syncRunning = syncMkdirProcess.running || syncScanProcess.running
+    root.syncRunning = syncMkdirProcess.running || syncWriteProcess.running || syncScanProcess.running
   }
 
   function scheduleSync() {
@@ -673,12 +691,15 @@ Item {
   }
 
   function writeSyncSnapshot() {
-    if (!syncConfigured()) {
+    if (!syncConfigured() || root.agentOneHelper === "") {
+      if (root.syncConfigured()) root.syncStatusText = "Usage sync write failed"
       finishSyncRun()
       return
     }
-    syncSnapshotFile.setText(JSON.stringify(localSnapshot(), null, 2) + "\n")
-    Qt.callLater(root.startSyncScan)
+    root.syncSnapshotPayload = JSON.stringify(localSnapshot(), null, 2) + "\n"
+    syncWriteProcess.stdinEnabled = true
+    syncWriteProcess.command = ["python3", "-B", root.agentOneHelper, "--write-snapshot", root.syncEffectiveDir, root.syncEffectiveFileName]
+    syncWriteProcess.running = true
   }
 
   function startSyncScan() {

@@ -1684,6 +1684,100 @@ def list_usage_records(usage_path: Path) -> dict[str, Any]:
   return {"ids": ids}
 
 
+_SNAPSHOT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,94}\.json\Z", re.IGNORECASE)
+
+
+def snapshot_filename_ok(name: str) -> bool:
+  """A single sync-folder entry: no separators, no hidden name, at most 100 chars."""
+  if not isinstance(name, str) or len(name) > 100 or name.startswith("."):
+    return False
+  if any(ch in name for ch in "/\\\x00"):
+    return False
+  return _SNAPSHOT_NAME.fullmatch(name) is not None
+
+
+def snapshot_directory(raw: str) -> Path:
+  """Absolute user-chosen sync folder. `..` is rejected so the path cannot climb out."""
+  if not isinstance(raw, str) or "\x00" in raw or not raw.startswith("/"):
+    raise ValueError("snapshot directory rejected")
+  parts = [part for part in raw.split("/") if part not in ("", ".")]
+  if not parts or any(part == ".." for part in parts):
+    raise ValueError("snapshot directory rejected")
+  return Path("/" + "/".join(parts))
+
+
+def read_stdin_bounded(max_bytes: int) -> bytes:
+  chunks: list[bytes] = []
+  total = 0
+  while total <= max_bytes:
+    chunk = sys.stdin.buffer.read(min(65536, max_bytes + 1 - total))
+    if not chunk:
+      break
+    chunks.append(chunk)
+    total += len(chunk)
+  raw = b"".join(chunks)
+  if len(raw) > max_bytes or b"\x00" in raw:
+    raise ValueError("snapshot rejected")
+  return raw
+
+
+def _write_all(fd: int, raw: bytes) -> None:
+  view = memoryview(raw)
+  while view:
+    written = os.write(fd, view)
+    if written <= 0:
+      raise OSError("short snapshot write")
+    view = view[written:]
+
+
+def write_snapshot(directory: Path, filename: str, raw: bytes) -> None:
+  """Replace one snapshot name without following a symlink at that name.
+
+  QSaveFile resolves an existing symlink and commits onto the target file.
+  This opens the sync directory and renames within it, which replaces the
+  directory entry itself. A planted ``hostname.json`` symlink is removed;
+  the file it pointed at is left unchanged.
+  """
+  if not snapshot_filename_ok(filename):
+    raise ValueError("unsafe snapshot name")
+  if not raw.endswith(b"\n"):
+    raw += b"\n"
+  if len(raw) > MAX_SNAPSHOT_BYTES:
+    raise ValueError("snapshot rejected")
+  try:
+    payload = json.loads(raw.decode("utf-8"))
+  except (UnicodeError, json.JSONDecodeError) as exc:
+    raise ValueError("snapshot rejected") from exc
+  if not isinstance(payload, dict) or not isinstance(payload.get("providers"), dict):
+    raise ValueError("snapshot rejected")
+
+  dir_fd = os.open(os.fspath(directory), os.O_RDONLY | os.O_DIRECTORY)
+  try:
+    tmp_name = f".{filename}.{os.urandom(12).hex()}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp_name, flags, 0o644, dir_fd=dir_fd)
+    try:
+      _write_all(fd, raw)
+      os.fsync(fd)
+    except BaseException:
+      os.close(fd)
+      os.unlink(tmp_name, dir_fd=dir_fd)
+      raise
+    os.close(fd)
+    try:
+      os.chmod(tmp_name, 0o644, dir_fd=dir_fd, follow_symlinks=False)
+      os.replace(tmp_name, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+      os.fsync(dir_fd)
+    except BaseException:
+      try:
+        os.unlink(tmp_name, dir_fd=dir_fd)
+      except OSError:
+        pass
+      raise
+  finally:
+    os.close(dir_fd)
+
+
 def load_snapshots(sync_path: Path) -> dict[str, Any]:
   snapshots: list[dict[str, Any]] = []
   if not sync_path.is_dir() or sync_path.is_symlink():
@@ -1790,6 +1884,12 @@ def main() -> int:
   parser.add_argument("--load-text", metavar="PATH", help="bounded no-follow single-line text read for QML")
   parser.add_argument("--list-usage", metavar="DIR", help="list safe usage-record ids in a directory")
   parser.add_argument("--load-snapshots", metavar="DIR", help="bounded no-follow snapshot merge inputs")
+  parser.add_argument(
+    "--write-snapshot",
+    nargs=2,
+    metavar=("DIR", "NAME"),
+    help="replace one snapshot file without following a symlink at that name",
+  )
   parser.add_argument("--remember-codex-limits", action="store_true", help="save current nonempty Codex windows before refresh")
   parser.add_argument("--repair-codex", action="store_true", help="clear a known false-positive Codex limits error")
   args = parser.parse_args()
@@ -1804,6 +1904,14 @@ def main() -> int:
     return emit_json(list_usage_records(Path(args.list_usage)))
   if args.load_snapshots:
     return emit_json(load_snapshots(Path(args.load_snapshots)))
+  if args.write_snapshot:
+    directory, filename = args.write_snapshot
+    try:
+      write_snapshot(snapshot_directory(directory), filename, read_stdin_bounded(MAX_SNAPSHOT_BYTES))
+    except (OSError, ValueError):
+      sys.stderr.write("snapshot write refused\n")
+      return 1
+    return 0
   if args.remember_codex_limits:
     return remember_codex_limits()
   if args.repair_codex:

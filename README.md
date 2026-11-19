@@ -46,7 +46,7 @@ Requires a current Omarchy 4.x / Quattro installation (Quickshell and the stock 
 omarchy plugin add https://github.com/calmasacow/omarchy-agent-one.git --enable
 ```
 
-OpenRouter configuration is optional; see above. Provider collectors read existing local histories and credentials without changing them. Usage records are stored under `${XDG_STATE_HOME:-~/.local/state}/omarchy/agents/usage`; collector caches use `${XDG_CACHE_HOME:-~/.cache}/omarchy/agent-usage`. Account quota refreshes contact the enabled providers' APIs. Optional synchronized snapshots include aggregate local statistics, never credentials, account balances, or quotas.
+OpenRouter configuration is optional; see above. Provider collectors read existing local histories and credentials without changing them. Usage records are stored under `${XDG_STATE_HOME:-~/.local/state}/omarchy/agents/usage`; collector caches use `${XDG_CACHE_HOME:-~/.cache}/omarchy/agent-usage`. Account quota refreshes contact the enabled providers' APIs. Optional synchronized snapshots include aggregate local statistics, never credentials, account balances, or quotas. A snapshot write replaces that file name inside the sync folder and does not follow a symlink planted at the name.
 
 Cursor uses the installed Omarchy collector. OpenCode, Pi, and Qwen selectors accept compatible local or synchronized usage records; dedicated bundled collectors for these apps remain on the roadmap. Providers appear only when there is data to display.
 

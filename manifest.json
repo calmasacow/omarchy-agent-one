@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "calmasacow.agent-one",
   "name": "Omarchy Agent One",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": "James Barnette",
   "license": "MIT",
   "description": "Usage dashboard for coding agents on the Omarchy agents panel.",

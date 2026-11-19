@@ -6,6 +6,9 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import os
+import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -166,6 +169,97 @@ class FileTrustTests(unittest.TestCase):
     other = self.root / "not-agent"
     other.write_text("grok\n", encoding="utf-8")
     self.assertEqual(mod.load_text_file(other, 256), "")
+
+  def test_write_snapshot_replaces_symlink_without_touching_target(self):
+    sync = self.root / "sync"
+    sync.mkdir()
+    victim = self.root / "victim.json"
+    victim.write_text("keep-me\n", encoding="utf-8")
+    victim_inode = victim.stat().st_ino
+    link = sync / "host.json"
+    link.symlink_to(victim)
+    payload = b'{"schemaVersion":1,"providers":{"grok":{"todayPrompts":1}}}\n'
+    mod.write_snapshot(sync, "host.json", payload)
+    self.assertEqual(victim.read_text(encoding="utf-8"), "keep-me\n")
+    self.assertEqual(victim.stat().st_ino, victim_inode)
+    self.assertTrue(link.is_file())
+    self.assertFalse(link.is_symlink())
+    self.assertEqual(link.read_bytes(), payload)
+    self.assertEqual(stat.S_IMODE(link.stat().st_mode), 0o644)
+    self.assertEqual(list(sync.glob(".*")), [])
+
+  def test_write_snapshot_through_symlinked_directory_stays_inside(self):
+    real = self.root / "real"
+    real.mkdir()
+    linked = self.root / "linked"
+    linked.symlink_to(real)
+    victim = self.root / "victim.txt"
+    victim.write_text("keep-me\n", encoding="utf-8")
+    (real / "host.json").symlink_to(victim)
+    mod.write_snapshot(linked, "host.json", b'{"providers":{}}\n')
+    self.assertEqual(victim.read_text(encoding="utf-8"), "keep-me\n")
+    written = real / "host.json"
+    self.assertTrue(written.is_file())
+    self.assertFalse(written.is_symlink())
+    self.assertEqual(written.read_bytes(), b'{"providers":{}}\n')
+
+  def test_write_snapshot_replaces_regular_file(self):
+    sync = self.root / "sync"
+    sync.mkdir()
+    path = sync / "host.json"
+    path.write_text('{"providers":{"old":{}}}\n', encoding="utf-8")
+    mod.write_snapshot(sync, "host.json", b'{"providers":{"grok":{}}}')
+    self.assertEqual(path.read_bytes(), b'{"providers":{"grok":{}}}\n')
+
+  def test_write_snapshot_replaces_fifo(self):
+    sync = self.root / "sync"
+    sync.mkdir()
+    fifo = sync / "host.json"
+    os.mkfifo(fifo)
+    mod.write_snapshot(sync, "host.json", b'{"providers":{}}\n')
+    self.assertTrue(fifo.is_file())
+    self.assertFalse(fifo.is_fifo())
+
+  def test_write_snapshot_rejects_escape_and_junk(self):
+    sync = self.root / "sync"
+    sync.mkdir()
+    outside = self.root / "escaped.json"
+    payload = b'{"providers":{}}\n'
+    for name in ("../escaped.json", "/tmp/escaped.json", ".hidden.json", "nope.txt", "a/b.json", ""):
+      with self.assertRaises(ValueError):
+        mod.write_snapshot(sync, name, payload)
+    self.assertFalse(outside.exists())
+    with self.assertRaises(ValueError):
+      mod.write_snapshot(sync, "host.json", b"not-json\n")
+    with self.assertRaises(ValueError):
+      mod.snapshot_directory("/tmp/sync/../../etc")
+    self.assertFalse((sync / "host.json").exists())
+
+  def test_write_snapshot_cli_refuses_symlink_target_and_escape(self):
+    sync = self.root / "sync"
+    sync.mkdir()
+    victim = self.root / "victim.json"
+    victim.write_text("keep-me\n", encoding="utf-8")
+    (sync / "host.json").symlink_to(victim)
+    payload = b'{"providers":{"grok":{}}}\n'
+    wrote = subprocess.run(
+      [sys.executable, str(SCRIPT), "--write-snapshot", str(sync), "host.json"],
+      input=payload,
+      capture_output=True,
+      check=False,
+    )
+    self.assertEqual(wrote.returncode, 0, wrote.stderr)
+    self.assertEqual(victim.read_text(encoding="utf-8"), "keep-me\n")
+    self.assertEqual((sync / "host.json").read_bytes(), payload)
+    escaped = subprocess.run(
+      [sys.executable, str(SCRIPT), "--write-snapshot", str(self.root), "../escaped.json"],
+      input=payload,
+      capture_output=True,
+      check=False,
+    )
+    self.assertNotEqual(escaped.returncode, 0)
+    self.assertIn(b"snapshot write refused", escaped.stderr)
+    self.assertFalse((self.root.parent / "escaped.json").exists())
 
   def test_load_snapshots_skips_symlink(self):
     good = self.root / "host.json"
