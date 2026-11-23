@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# Launch a chosen coding agent the way Omarchy launches the default one.
+#
+# omarchy-agent has no option naming the agent: it asks omarchy-default-agent.
+# Putting this plugin's default-agent shim first on PATH answers that question
+# with the agent picked in the panel, so the launch keeps omarchy-agent's
+# unattended flags, account pin, user-install preference and window class
+# without copying them here. The default agent setting is never touched.
+
+set -euo pipefail
+
+usage() {
+  echo "Usage: omarchy-agent-one-launch <agent>" >&2
+  exit 2
+}
+
+(($# == 1)) || usage
+agent=$1
+
+# The same rule the panel applies to agent ids. A leading letter or digit keeps
+# a name like --pick from reaching omarchy-agent as an option.
+[[ ${#agent} -le 64 && $agent =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || usage
+
+# omarchy-agent reports a missing command on stderr, which nobody sees after a
+# click in the panel.
+if omarchy-cmd-missing "$agent"; then
+  omarchy-notification-send -g 󱚣 "$agent is not installed" "Install it or pick another agent."
+  exit 1
+fi
+
+shim_dir="$(dirname "$(readlink -f "$0")")/default-agent"
+
+# omarchy-launch-tui starts the terminal through uwsm-app, which does not pass
+# this environment on, so the agent's own session sees the real default again.
+PATH="$shim_dir:$PATH" AGENT_ONE_LAUNCH_AGENT="$agent" exec omarchy-agent
