@@ -119,6 +119,31 @@ Panel {
     root.close()
   }
 
+  // The Omarchy agent each selector button opens on right-click. Overview and
+  // OpenRouter are not agents, so they have none.
+  function providerAgentName(item) {
+    var id = String(item && item.providerId || "")
+    var agents = {
+      claude: "claude",
+      codex: "codex",
+      grok: "grok",
+      google: "agy",
+      cursor: "cursor-agent",
+      deepseek: "dsh",
+      opencode: "opencode",
+      pi: "pi",
+      qwen: "qwen"
+    }
+    return agents[id] || ""
+  }
+
+  function launchProviderAgent(item) {
+    var agent = root.providerAgentName(item)
+    if (agent === "" || usage.agentOneLauncher === "" || !root.bar) return
+    root.bar.run(Util.shellQuote(usage.agentOneLauncher) + " " + Util.shellQuote(agent))
+    root.close()
+  }
+
   function openLink(url) {
     var href = String(url || "")
     if (href === "") return
@@ -778,6 +803,7 @@ Panel {
                       root.cursorActive = true
                       root.selectProvider(modelData.providerIndex)
                     }
+                    onRightClicked: root.launchProviderAgent(modelData.provider)
                     onHovered: function(isHovered) { if (isHovered) root.cursorActive = true }
                   }
                 }

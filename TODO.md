@@ -20,6 +20,8 @@
 - [x] Add regression checks for selector navigation, OpenRouter fallback preservation, account data exclusion from sync snapshots, and provider discovery on machines with more than 16 usage records.
 
 - [x] Present the requested agents in balanced selector rows of up to three buttons.
+- [x] Right-click a selector button to launch that agent through the stock `omarchy-agent`, even when it is not the default.
+- [ ] Pass the agent with `omarchy-agent --agent` once Omarchy supports it, replacing the default-agent shim.
 - [ ] Give each provider an accurate source/status label for local stats and account limits.
 - [x] Preserve last good Google token and quota data when a scan or quota refresh has no data.
 - [x] Integrate Google collector with Omarchy refresh, settings, and synchronized snapshots.

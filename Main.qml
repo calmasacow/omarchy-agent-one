@@ -34,6 +34,13 @@ Item {
     for (var i = 0; i < parts.length; i++) if (parts[i] === "..") return ""
     return dir + "/scripts/omarchy-agent-one-helper"
   }
+  readonly property string agentOneLauncher: {
+    var dir = String(root.pluginDir || "")
+    if (dir === "" || dir.indexOf("\x00") >= 0) return ""
+    var parts = dir.split("/")
+    for (var i = 0; i < parts.length; i++) if (parts[i] === "..") return ""
+    return dir + "/scripts/omarchy-agent-one-launch"
+  }
   readonly property string defaultAgentPath: (Quickshell.env("XDG_CONFIG_HOME") || (root.home + "/.config")) + "/omarchy/defaults/agent"
 
   property string defaultAgentBuf: ""
