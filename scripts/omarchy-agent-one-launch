@@ -31,6 +31,7 @@ fi
 
 shim_dir="$(dirname "$(readlink -f "$0")")/default-agent"
 
-# omarchy-launch-tui starts the terminal through uwsm-app, which does not pass
-# this environment on, so the agent's own session sees the real default again.
+# The shim directory also stands in for omarchy-launch-tui, which takes this
+# environment back out before the terminal opens, so the agent's own session
+# sees the real default again.
 PATH="$shim_dir:$PATH" AGENT_ONE_LAUNCH_AGENT="$agent" exec omarchy-agent

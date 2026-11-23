@@ -10,10 +10,12 @@ LAUNCHER = ROOT / 'scripts/omarchy-agent-one-launch'
 SHIM = ROOT / 'scripts/default-agent/omarchy-default-agent'
 
 # Stand-ins for the Omarchy commands the launcher reaches. The fake
-# omarchy-agent asks omarchy-default-agent, as the real one does, and records
-# the answer instead of opening a terminal.
+# omarchy-agent asks omarchy-default-agent and hands off to omarchy-launch-tui,
+# as the real one does; the fake terminal launcher records the environment the
+# agent session would inherit instead of opening a terminal.
 FAKES = {
-  'omarchy-agent': 'omarchy-default-agent > "$FAKE_DIR/launched"\n',
+  'omarchy-agent': 'omarchy-default-agent > "$FAKE_DIR/launched"\nexec omarchy-launch-tui --app-id=org.omarchy.agent agent\n',
+  'omarchy-launch-tui': 'printf "%s\\n" "$*" > "$FAKE_DIR/terminal"\nenv > "$FAKE_DIR/session-env"\n',
   'omarchy-cmd-missing': 'exit "${FAKE_MISSING:-1}"\n',
   'omarchy-notification-send': 'printf "%s" "$*" > "$FAKE_DIR/notified"\n',
 }
@@ -42,6 +44,16 @@ class LaunchTests(unittest.TestCase):
     result = self.launch('agy')
     self.assertEqual(result.returncode, 0, result.stderr)
     self.assertEqual((self.dir / 'launched').read_text(), 'agy\n')
+
+  def test_agent_session_gets_clean_environment(self):
+    # uwsm-app evals the terminal command in its own process, so anything the
+    # launcher sets would reach the agent's session.
+    result = self.launch('claude')
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual((self.dir / 'terminal').read_text(), '--app-id=org.omarchy.agent agent\n')
+    env = dict(line.split('=', 1) for line in (self.dir / 'session-env').read_text().splitlines() if '=' in line)
+    self.assertFalse('AGENT_ONE_LAUNCH_AGENT' in env, 'chosen agent leaked into the session')
+    self.assertEqual(env['PATH'], self.env['PATH'])
 
   def test_rejects_unsafe_names(self):
     for args in [[], [''], ['--pick'], ['../x'], ['a b'], ['claude', 'codex'], ['a' * 65]]:
