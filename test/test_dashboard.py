@@ -74,8 +74,9 @@ selectProvider(3); assert.equal(selectedProviderId, 'overview');
     script = '''const assert = require('node:assert/strict');
 const runs = [];
 let closes = 0;
-const Util = {shellQuote: s => "'" + s + "'"};
-const usage = {agentOneLauncher: '/p/scripts/omarchy-agent-one-launch'};
+// The same quoting as Omarchy's Util.shellQuote, so a broken quote shows.
+const Util = {shellQuote: s => "'" + String(s).replace(/'/g, "'\\''") + "'"};
+const usage = {agentOneLauncher: "/p/it's here/scripts/omarchy-agent-one-launch"};
 const root = {bar: {run: c => runs.push(c)}, close: () => closes++};
 ''' + js_function('Panel.qml', 'providerAgentName') + js_function('Panel.qml', 'launchProviderAgent') + '''
 root.providerAgentName = providerAgentName;
@@ -94,7 +95,7 @@ assert.equal(providerAgentName(null), '');
   def test_launch_provider_agent_quotes_command(self):
     self.run_launch_script('''
 launchProviderAgent({providerId: 'google'});
-assert.deepEqual(runs, ["'/p/scripts/omarchy-agent-one-launch' 'agy'"]);
+assert.deepEqual(runs, ["'/p/it'\\''s here/scripts/omarchy-agent-one-launch' 'agy'"]);
 assert.equal(closes, 1);
 ''')
 

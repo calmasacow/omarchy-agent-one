@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Stands in for Omarchy's omarchy-default-agent while omarchy-agent-one-launch
-# runs omarchy-agent: it answers with the agent picked in the panel. It lives
-# in its own directory so only this one command is shadowed on PATH.
+# runs omarchy-agent: it answers with the agent picked in the panel. It shares
+# its directory only with the omarchy-launch-tui shim that undoes it, so no
+# other command is shadowed on PATH.
 
 printf '%s\n' "${AGENT_ONE_LAUNCH_AGENT:-}"
