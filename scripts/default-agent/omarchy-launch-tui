@@ -1,0 +1,17 @@
+#!/bin/bash
+
+# Stands in for Omarchy's omarchy-launch-tui while omarchy-agent-one-launch
+# runs omarchy-agent. uwsm-app evals the terminal command in its own process,
+# so the agent's session would inherit the launch environment; this drops the
+# shim directory from PATH and the chosen agent before the real launcher runs,
+# leaving omarchy-default-agent to answer with the real default in that session.
+
+shim_dir="$(dirname "$(readlink -f "$0")")"
+
+path=":$PATH:"
+path=${path//":$shim_dir:"/":"}
+path=${path#:}
+PATH=${path%:}
+unset AGENT_ONE_LAUNCH_AGENT
+
+exec omarchy-launch-tui "$@"

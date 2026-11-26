@@ -69,6 +69,52 @@ selectProvider(3); assert.equal(selectedProviderId, 'overview');
     for private_account_field in ['balance:', 'limits:', 'activity:']:
       self.assertNotIn(private_account_field, snapshot)
 
+  def run_launch_script(self, body):
+    # Stands in for the panel and the bar: the launch is recorded, not run.
+    script = '''const assert = require('node:assert/strict');
+const runs = [];
+let closes = 0;
+// The same quoting as Omarchy's Util.shellQuote, so a broken quote shows.
+const Util = {shellQuote: s => "'" + String(s).replace(/'/g, "'\\''") + "'"};
+const usage = {agentOneLauncher: "/p/it's here/scripts/omarchy-agent-one-launch"};
+const root = {bar: {run: c => runs.push(c)}, close: () => closes++};
+''' + js_function('Panel.qml', 'providerAgentName') + js_function('Panel.qml', 'launchProviderAgent') + '''
+root.providerAgentName = providerAgentName;
+''' + body
+    subprocess.run(['node', '-e', script], check=True)
+
+  def test_provider_agent_names(self):
+    self.run_launch_script('''
+const expected = {claude: 'claude', codex: 'codex', grok: 'grok', google: 'agy',
+  cursor: 'cursor-agent', deepseek: 'dsh', opencode: 'opencode', pi: 'pi', qwen: 'qwen',
+  overview: '', openrouter: '', grokbot: ''};
+for (const id in expected) assert.equal(providerAgentName({providerId: id}), expected[id], id);
+assert.equal(providerAgentName(null), '');
+''')
+
+  def test_launch_provider_agent_quotes_command(self):
+    self.run_launch_script('''
+launchProviderAgent({providerId: 'google'});
+assert.deepEqual(runs, ["'/p/it'\\''s here/scripts/omarchy-agent-one-launch' 'agy'"]);
+assert.equal(closes, 1);
+''')
+
+  def test_launch_provider_agent_ignores_non_agents(self):
+    self.run_launch_script('''
+launchProviderAgent({providerId: 'overview'});
+launchProviderAgent({providerId: 'openrouter'});
+usage.agentOneLauncher = '';
+launchProviderAgent({providerId: 'claude'});
+assert.deepEqual(runs, []);
+assert.equal(closes, 0);
+''')
+
+  def test_selector_right_click_launches_agent(self):
+    panel = (ROOT / 'Panel.qml').read_text()
+    main = (ROOT / 'Main.qml').read_text()
+    self.assertIn('onRightClicked: root.launchProviderAgent(modelData.provider)', panel)
+    self.assertIn('scripts/omarchy-agent-one-launch', main)
+
 
 if __name__ == '__main__':
   unittest.main()

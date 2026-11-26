@@ -64,6 +64,7 @@ Provider histories, sign-ins, OpenRouter configuration, shared agent usage recor
 |---|---|
 | Left-click | Open or close the usage panel |
 | Right-click | Launch the default coding agent |
+| Right-click an agent button | Launch that agent, even if it is not the default |
 | Middle-click | Next agent |
 | `h` / `l` | Switch agent |
 | `r` or Enter | Refresh |
